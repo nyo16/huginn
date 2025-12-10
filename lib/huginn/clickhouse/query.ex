@@ -39,7 +39,7 @@ defmodule Huginn.Clickhouse.Query do
     * `:send_output_columns` - Include column metadata in response
 
   """
-  @spec build(String.t(), query_opts()) :: QueryInfo.t()
+  @spec build(String.t(), query_opts()) :: struct()
   def build(sql, opts \\ []) do
     %QueryInfo{
       query: sql,
@@ -68,7 +68,7 @@ defmodule Huginn.Clickhouse.Query do
     * `:input_compression` - Compression type of input data
 
   """
-  @spec build_insert(String.t(), binary(), keyword()) :: QueryInfo.t()
+  @spec build_insert(String.t(), binary(), keyword()) :: struct()
   def build_insert(sql, data, opts \\ []) do
     %QueryInfo{
       query: sql,
@@ -91,7 +91,7 @@ defmodule Huginn.Clickhouse.Query do
 
   Used with `ExecuteQueryWithStreamInput` and `ExecuteQueryWithStreamIO` methods.
   """
-  @spec build_continuation(binary(), keyword()) :: QueryInfo.t()
+  @spec build_continuation(binary(), keyword()) :: struct()
   def build_continuation(data, opts \\ []) do
     %QueryInfo{
       input_data: data,
@@ -102,7 +102,7 @@ defmodule Huginn.Clickhouse.Query do
   @doc """
   Builds a cancel QueryInfo to stop a running query.
   """
-  @spec build_cancel() :: QueryInfo.t()
+  @spec build_cancel() :: struct()
   def build_cancel do
     %QueryInfo{cancel: true}
   end
@@ -118,7 +118,7 @@ defmodule Huginn.Clickhouse.Query do
 
   """
   @spec build_external_table(String.t(), [{String.t(), String.t()}], binary(), keyword()) ::
-          ExternalTable.t()
+          struct()
   def build_external_table(name, columns, data, opts \\ []) do
     %ExternalTable{
       name: name,

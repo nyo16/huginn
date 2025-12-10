@@ -9,7 +9,6 @@ defmodule Huginn.Clickhouse.Stream do
   """
 
   alias Huginn.Clickhouse.{Query, Result}
-  alias Clickhouse.Grpc.QueryInfo
 
   @doc """
   Creates an input stream from an enumerable of data chunks.
@@ -33,7 +32,7 @@ defmodule Huginn.Clickhouse.Stream do
       |> Stream.input_stream("INSERT INTO t FORMAT CSV", format: "CSV")
 
   """
-  @spec input_stream(String.t(), Enumerable.t(), keyword()) :: Enumerable.t(QueryInfo.t())
+  @spec input_stream(String.t(), Enumerable.t(), keyword()) :: Enumerable.t(struct())
   def input_stream(sql, data_enum, opts \\ []) do
     format = Keyword.get(opts, :format, "TabSeparated")
     chunk_size = Keyword.get(opts, :chunk_size, 1000)

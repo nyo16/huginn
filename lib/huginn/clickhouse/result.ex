@@ -55,7 +55,7 @@ defmodule Huginn.Clickhouse.Result do
   @doc """
   Converts a gRPC Result message to a Huginn.Clickhouse.Result struct.
   """
-  @spec from_grpc(GrpcResult.t()) :: {:ok, t()} | {:error, Exception.t()}
+  @spec from_grpc(struct()) :: {:ok, t()} | {:error, struct()}
   def from_grpc(%GrpcResult{exception: %Exception{code: code} = exception})
       when code != 0 do
     {:error, exception}

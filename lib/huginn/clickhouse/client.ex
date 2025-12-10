@@ -476,7 +476,7 @@ defmodule Huginn.Clickhouse.Client do
       end
 
   """
-  @spec stream_io(query_opts()) :: {Enumerable.t(), (Clickhouse.Grpc.QueryInfo.t() -> :ok)}
+  @spec stream_io(query_opts()) :: {Enumerable.t(), (struct() -> :ok)}
   def stream_io(opts \\ []) do
     pool = Keyword.get(opts, :pool, pool_name())
 
