@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- Enable gRPC interface on port 9100 -->
+    <grpc_port>9100</grpc_port>
+
+    <grpc>
+        <enable_ssl>false</enable_ssl>
+        <max_send_message_size>-1</max_send_message_size>
+        <max_receive_message_size>-1</max_receive_message_size>
+        <verbose_logs>false</verbose_logs>
+    </grpc>
+</clickhouse>
