@@ -1,7 +1,7 @@
 defmodule Huginn.MixProject do
   use Mix.Project
 
-  @version "0.3.0"
+  @version "0.4.0"
   @source_url "https://github.com/nyo16/huginn"
 
   def project do
@@ -15,7 +15,9 @@ defmodule Huginn.MixProject do
       package: package(),
       docs: docs(),
       name: "Huginn",
-      source_url: @source_url
+      source_url: @source_url,
+      homepage_url: @source_url,
+      dialyzer: [plt_file: {:no_warn, "priv/plts/project.plt"}]
     ]
   end
 
@@ -28,8 +30,11 @@ defmodule Huginn.MixProject do
 
   defp deps do
     [
-      {:grpc_connection_pool, "~> 0.2.1"},
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:grpc_connection_pool, "~> 0.4.0"},
+      {:telemetry, "~> 1.0"},
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -42,16 +47,17 @@ defmodule Huginn.MixProject do
       name: "huginn",
       licenses: ["MIT"],
       links: %{
-        "GitHub" => @source_url
+        "GitHub" => @source_url,
+        "Changelog" => "https://hexdocs.pm/huginn/changelog.html"
       },
-      files: ~w(lib priv/protos .formatter.exs mix.exs README.md LICENSE)
+      files: ~w(lib priv/protos .formatter.exs mix.exs README.md CHANGELOG.md LICENSE)
     ]
   end
 
   defp docs do
     [
       main: "readme",
-      extras: ["README.md"],
+      extras: ["README.md", "CHANGELOG.md", "LICENSE"],
       source_ref: "v#{@version}",
       source_url: @source_url
     ]

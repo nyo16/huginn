@@ -1,0 +1,47 @@
+name: Release
+
+# Publishes to Hex when a version tag is pushed, e.g. `git tag v0.4.0 && git push --tags`.
+# Requires a `HEX_API_KEY` repository secret (generate with `mix hex.user key generate`).
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  ELIXIR_VERSION: "1.18"
+  OTP_VERSION: "27.0"
+
+jobs:
+  publish:
+    name: Publish to Hex
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Set version from tag
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG_VERSION="${REF_NAME#v}"
+          sed -i "s/@version \".*\"/@version \"${TAG_VERSION}\"/" mix.exs
+          grep '@version' mix.exs
+
+      - run: mix deps.get
+        env:
+          MIX_ENV: dev
+
+      - run: mix compile
+        env:
+          MIX_ENV: dev
+
+      - name: Publish to Hex
+        env:
+          MIX_ENV: dev
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish --yes

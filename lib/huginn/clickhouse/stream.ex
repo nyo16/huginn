@@ -156,28 +156,21 @@ defmodule Huginn.Clickhouse.Stream do
   end
 
   defp encode_chunk(chunk, "TabSeparated") when is_list(chunk) do
-    chunk
-    |> Enum.map(fn row -> Enum.join(row, "\t") end)
-    |> Enum.join("\n")
+    Enum.map_join(chunk, "\n", fn row -> Enum.join(row, "\t") end)
   end
 
   defp encode_chunk(chunk, "CSV") when is_list(chunk) do
-    chunk
-    |> Enum.map(fn row ->
-      row
-      |> Enum.map(&encode_csv_field/1)
-      |> Enum.join(",")
+    Enum.map_join(chunk, "\n", fn row ->
+      Enum.map_join(row, ",", &encode_csv_field/1)
     end)
-    |> Enum.join("\n")
   end
 
   defp encode_chunk(chunk, "JSONEachRow") when is_list(chunk) do
-    chunk
-    |> Enum.map(&Jason.encode!/1)
-    |> Enum.join("\n")
+    Enum.map_join(chunk, "\n", &Jason.encode!/1)
   end
 
-  defp encode_chunk(chunk, _format) when is_binary(chunk), do: chunk
+  # Chunks always arrive as lists here (they come from `Enum.take/2` in
+  # `input_stream/3`), so an unknown format just joins the rows with newlines.
   defp encode_chunk(chunk, _format) when is_list(chunk), do: Enum.join(chunk, "\n")
 
   defp encode_csv_field(field) when is_binary(field) do

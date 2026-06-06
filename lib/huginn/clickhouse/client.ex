@@ -75,8 +75,8 @@ defmodule Huginn.Clickhouse.Client do
 
   """
 
-  alias Huginn.Clickhouse.{Config, Query, Result}
   alias Clickhouse.Grpc.ClickHouse.Stub
+  alias Huginn.Clickhouse.{Config, Query, Result, Retry, SQL}
 
   @type query_opts :: [
           pool: atom(),
@@ -84,7 +84,9 @@ defmodule Huginn.Clickhouse.Client do
           format: String.t(),
           settings: map(),
           timeout: non_neg_integer(),
-          query_id: String.t()
+          query_id: String.t(),
+          retries: non_neg_integer(),
+          retry_backoff: non_neg_integer()
         ]
 
   # =============================================================================
@@ -127,15 +129,14 @@ defmodule Huginn.Clickhouse.Client do
   """
   @spec query(String.t(), query_opts()) :: {:ok, Result.t()} | {:error, term()}
   def query(sql, opts \\ []) do
-    pool = Keyword.get(opts, :pool, pool_name())
     config = get_config()
+    pool = Keyword.get(opts, :pool, config.pool_name)
     query_opts = Query.with_auth(opts, config)
     query_info = Query.build(sql, query_opts)
 
-    with {:ok, channel} <- GrpcConnectionPool.get_channel(pool),
-         {:ok, grpc_result} <- Stub.execute_query(channel, query_info, grpc_opts(opts)) do
-      Result.from_grpc(grpc_result)
-    end
+    instrument(:query, sql, query_info.query_id, pool, fn ->
+      Retry.with_retry(fn -> execute(pool, query_info, opts) end, opts)
+    end)
   end
 
   @doc """
@@ -181,15 +182,14 @@ defmodule Huginn.Clickhouse.Client do
   """
   @spec insert(String.t(), binary(), keyword()) :: {:ok, Result.t()} | {:error, term()}
   def insert(sql, data, opts \\ []) do
-    pool = Keyword.get(opts, :pool, pool_name())
     config = get_config()
+    pool = Keyword.get(opts, :pool, config.pool_name)
     query_opts = Query.with_auth(opts, config)
     query_info = Query.build_insert(sql, data, query_opts)
 
-    with {:ok, channel} <- GrpcConnectionPool.get_channel(pool),
-         {:ok, grpc_result} <- Stub.execute_query(channel, query_info, grpc_opts(opts)) do
-      Result.from_grpc(grpc_result)
-    end
+    instrument(:insert, sql, query_info.query_id, pool, fn ->
+      Retry.with_retry(fn -> execute(pool, query_info, opts) end, opts)
+    end)
   end
 
   # =============================================================================
@@ -241,20 +241,27 @@ defmodule Huginn.Clickhouse.Client do
       IO.puts("Inserted \#{Agent.get(counter, & &1)} rows")
 
   """
-  @spec insert_stream(String.t(), Enumerable.t(), keyword()) :: {:ok, Result.t()} | {:error, term()}
+  @spec insert_stream(String.t(), Enumerable.t(), keyword()) ::
+          {:ok, Result.t()} | {:error, term()}
   def insert_stream(sql, data_stream, opts \\ []) do
-    pool = Keyword.get(opts, :pool, pool_name())
     config = get_config()
+    pool = Keyword.get(opts, :pool, config.pool_name)
     query_opts = Query.with_auth(opts, config)
 
-    with {:ok, channel} <- GrpcConnectionPool.get_channel(pool) do
-      input_stream = build_insert_stream(sql, data_stream, query_opts)
+    messages = build_insert_stream(sql, data_stream, query_opts)
 
-      case Stub.execute_query_with_stream_input(channel, input_stream) do
-        {:ok, grpc_result} -> Result.from_grpc(grpc_result)
-        {:error, _} = error -> error
+    instrument(:insert_stream, sql, nil, pool, fn ->
+      with {:ok, channel} <- GrpcConnectionPool.get_channel(pool) do
+        # ExecuteQueryWithStreamInput is a client-streaming RPC: the stub call
+        # opens the stream, each QueryInfo is pushed with `send_request/3`, and
+        # a final END_STREAM frame closes it. The reply is a single Result.
+        channel
+        |> Stub.execute_query_with_stream_input(grpc_opts(opts))
+        |> send_input_messages(messages)
+        |> GRPC.Stub.recv(grpc_opts(opts))
+        |> from_grpc_reply()
       end
-    end
+    end)
   end
 
   # =============================================================================
@@ -320,8 +327,8 @@ defmodule Huginn.Clickhouse.Client do
   """
   @spec stream_query(String.t(), query_opts()) :: Enumerable.t()
   def stream_query(sql, opts \\ []) do
-    pool = Keyword.get(opts, :pool, pool_name())
     config = get_config()
+    pool = Keyword.get(opts, :pool, config.pool_name)
     query_opts = Query.with_auth(opts, config)
     query_info = Query.build(sql, query_opts)
 
@@ -476,77 +483,84 @@ defmodule Huginn.Clickhouse.Client do
       end
 
   """
-  @spec stream_io(query_opts()) :: {Enumerable.t(), (struct() -> :ok)}
+  @spec stream_io(query_opts()) :: {Enumerable.t(), (struct() -> :ok)} | {:error, term()}
   def stream_io(opts \\ []) do
-    pool = Keyword.get(opts, :pool, pool_name())
+    config = get_config()
+    pool = Keyword.get(opts, :pool, config.pool_name)
 
-    {:ok, channel} = GrpcConnectionPool.get_channel(pool)
+    case GrpcConnectionPool.get_channel(pool) do
+      {:ok, channel} ->
+        # ExecuteQueryWithStreamIO is bidirectional, and the underlying gun
+        # stream is owned by a single process (it receives all stream messages).
+        # We therefore run the whole stream in one dedicated owner process:
+        # `send_fn` forwards QueryInfo messages to it, and the output stream
+        # pulls replies back. Sending and consuming can happen from any process.
+        owner = spawn_link(fn -> io_owner(channel, opts) end)
 
-    {input_stream, send_fn} = create_send_stream()
-
-    output_stream =
-      Stub.execute_query_with_stream_io(channel, input_stream)
-      |> parse_output_stream()
-
-    {output_stream, send_fn}
-  end
-
-  defp create_send_stream do
-    {:ok, agent} = Agent.start_link(fn -> {:queue.new(), nil} end)
-
-    send_fn = fn query_info ->
-      Agent.update(agent, fn {queue, waiting} ->
-        case waiting do
-          nil ->
-            {:queue.in(query_info, queue), nil}
-
-          pid ->
-            send(pid, {:item, query_info})
-            {queue, nil}
+        send_fn = fn query_info ->
+          send(owner, {:send, query_info})
+          :ok
         end
-      end)
 
-      :ok
+        {io_output_stream(owner), send_fn}
+
+      {:error, _} = error ->
+        error
     end
-
-    stream =
-      Stream.resource(
-        fn -> agent end,
-        fn agent ->
-          result =
-            Agent.get_and_update(agent, fn {queue, _} ->
-              case :queue.out(queue) do
-                {{:value, item}, new_queue} ->
-                  {item, {new_queue, nil}}
-
-                {:empty, queue} ->
-                  {nil, {queue, self()}}
-              end
-            end)
-
-          case result do
-            nil ->
-              receive do
-                {:item, item} -> {[item], agent}
-              after
-                100 -> {[], agent}
-              end
-
-            item ->
-              {[item], agent}
-          end
-        end,
-        fn agent -> Agent.stop(agent) end
-      )
-
-    {stream, send_fn}
   end
 
-  defp parse_output_stream(stream) do
-    Stream.map(stream, fn
-      {:ok, grpc_result} -> Result.from_grpc(grpc_result)
-      {:error, _} = error -> error
-    end)
+  # Owner process: opens the bidi stream, pushes queued QueryInfo messages, and
+  # once a consumer subscribes, half-closes the stream and forwards each reply.
+  defp io_owner(channel, opts) do
+    stream = Stub.execute_query_with_stream_io(channel, grpc_opts(opts))
+    io_owner_loop(stream, opts)
+  end
+
+  defp io_owner_loop(stream, opts) do
+    receive do
+      {:send, query_info} ->
+        io_owner_loop(GRPC.Stub.send_request(stream, query_info, []), opts)
+
+      {:recv, sub} ->
+        stream
+        |> GRPC.Stub.end_stream()
+        |> GRPC.Stub.recv(grpc_opts(opts))
+        |> io_forward(sub)
+
+      :stop ->
+        :ok
+    end
+  end
+
+  defp io_forward({:ok, replies}, sub), do: io_forward({:ok, replies, nil}, sub)
+
+  defp io_forward({:ok, replies, _headers}, sub) do
+    Enum.each(replies, fn reply -> send(sub, {:reply, self(), reply}) end)
+    send(sub, {:done, self()})
+  end
+
+  defp io_forward({:error, _} = error, sub) do
+    send(sub, {:reply, self(), error})
+    send(sub, {:done, self()})
+  end
+
+  defp io_output_stream(owner) do
+    Stream.resource(
+      fn ->
+        send(owner, {:recv, self()})
+        owner
+      end,
+      &next_io_reply/1,
+      fn owner -> send(owner, :stop) end
+    )
+  end
+
+  defp next_io_reply(owner) do
+    receive do
+      {:reply, ^owner, {:ok, grpc_result}} -> {[Result.from_grpc(grpc_result)], owner}
+      {:reply, ^owner, {:error, _} = error} -> {[error], owner}
+      {:done, ^owner} -> {:halt, owner}
+    end
   end
 
   # =============================================================================
@@ -594,7 +608,7 @@ defmodule Huginn.Clickhouse.Client do
   """
   @spec cancel(String.t(), keyword()) :: :ok | {:error, term()}
   def cancel(query_id, opts \\ []) do
-    sql = "KILL QUERY WHERE query_id = '#{escape_string(query_id)}'"
+    sql = "KILL QUERY WHERE query_id = '#{SQL.escape(query_id)}'"
 
     case query(sql, opts) do
       {:ok, _} -> :ok
@@ -604,6 +618,12 @@ defmodule Huginn.Clickhouse.Client do
 
   @doc """
   Cancels all queries matching a pattern.
+
+  > #### Trusted input only {: .warning}
+  >
+  > `condition` is interpolated verbatim into a `KILL QUERY WHERE` statement.
+  > Never pass untrusted/user-supplied input — build the condition from trusted
+  > values only. To cancel a single known query id safely, use `cancel/2`.
 
   ## Examples
 
@@ -650,14 +670,38 @@ defmodule Huginn.Clickhouse.Client do
     Config.from_env()
   end
 
-  defp pool_name do
-    config = get_config()
-    config.pool_name
-  end
-
   defp grpc_opts(opts) do
     timeout = Keyword.get(opts, :timeout, 60_000)
     [timeout: timeout]
+  end
+
+  # Single request/response over `ExecuteQuery`: acquire a channel, call the
+  # stub, parse the result. Shared by `query/2` and `insert/3`.
+  defp execute(pool, query_info, opts) do
+    with {:ok, channel} <- GrpcConnectionPool.get_channel(pool),
+         {:ok, grpc_result} <- Stub.execute_query(channel, query_info, grpc_opts(opts)) do
+      Result.from_grpc(grpc_result)
+    end
+  end
+
+  # Wraps a request in a `:telemetry` span, emitting
+  # `[:huginn, :query, :start | :stop | :exception]`. On `:stop`, row count and
+  # stats are merged into the metadata when the result is a `Result` struct.
+  defp instrument(method, sql, query_id, pool, fun) do
+    metadata = %{method: method, sql: sql, query_id: query_id, pool: pool}
+
+    :telemetry.span([:huginn, :query], metadata, fn ->
+      result = fun.()
+
+      extra =
+        case result do
+          {:ok, %Result{} = r} -> %{rows: length(r.rows), stats: r.stats}
+          {:error, reason} -> %{error: reason}
+          _ -> %{}
+        end
+
+      {result, Map.merge(metadata, extra)}
+    end)
   end
 
   defp build_insert_stream(sql, data_stream, opts) do
@@ -672,7 +716,32 @@ defmodule Huginn.Clickhouse.Client do
     end)
   end
 
-  defp escape_string(str) do
-    String.replace(str, "'", "\\'")
+  # Pushes each QueryInfo onto a client-streaming gRPC stream and closes it.
+  #
+  # One message is buffered so we always know which is last: every non-final
+  # message is sent with `next_query_info: true` (ClickHouse keeps reading), and
+  # the final one is sent with `next_query_info: false` plus an END_STREAM frame.
+  # Buffering a single message keeps the send lazy for large inputs.
+  defp send_input_messages(grpc_stream, messages) do
+    case Enum.reduce(messages, {grpc_stream, :none}, &send_pending/2) do
+      {grpc_stream, :none} -> GRPC.Stub.end_stream(grpc_stream)
+      {grpc_stream, last} -> send_message(grpc_stream, last, false, end_stream: true)
+    end
   end
+
+  defp send_pending(message, {grpc_stream, :none}), do: {grpc_stream, message}
+
+  defp send_pending(message, {grpc_stream, pending}) do
+    {send_message(grpc_stream, pending, true, []), message}
+  end
+
+  defp send_message(grpc_stream, message, next_query_info, opts) do
+    GRPC.Stub.send_request(grpc_stream, %{message | next_query_info: next_query_info}, opts)
+  end
+
+  # Normalizes a unary gRPC reply (client-streaming returns a single Result,
+  # optionally with headers when `:return_headers` is set).
+  defp from_grpc_reply({:ok, grpc_result}), do: Result.from_grpc(grpc_result)
+  defp from_grpc_reply({:ok, grpc_result, _headers}), do: Result.from_grpc(grpc_result)
+  defp from_grpc_reply({:error, _} = error), do: error
 end

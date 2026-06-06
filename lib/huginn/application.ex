@@ -3,6 +3,8 @@ defmodule Huginn.Application do
 
   use Application
 
+  alias Huginn.Clickhouse.Config
+
   @impl true
   def start(_type, _args) do
     children = build_children()
@@ -23,8 +25,8 @@ defmodule Huginn.Application do
         children
 
       clickhouse_config when is_list(clickhouse_config) ->
-        config = Huginn.Clickhouse.Config.new(clickhouse_config)
-        pool_config = Huginn.Clickhouse.Config.to_pool_config(config)
+        config = Config.new(clickhouse_config)
+        pool_config = Config.to_pool_config(config)
         children ++ [{GrpcConnectionPool, pool_config}]
     end
   end
