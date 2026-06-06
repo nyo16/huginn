@@ -341,7 +341,11 @@ This starts ClickHouse with gRPC enabled on port 9100.
 ### Run Tests
 
 ```bash
+# Unit tests (no ClickHouse required)
 mix test
+
+# Include the end-to-end suite (requires ClickHouse via docker-compose up -d)
+mix test --include integration
 ```
 
 ### Generate Documentation

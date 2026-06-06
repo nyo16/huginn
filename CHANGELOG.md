@@ -26,6 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Streaming insert (`insert_stream/3`) actually works now.** It was calling
+  the client-streaming gRPC stub incorrectly (passing the request enumerable as
+  the options argument), so no data was ever sent. It now opens the stream,
+  pushes each `QueryInfo` with `GRPC.Stub.send_request/3` (setting
+  `next_query_info` correctly and emitting a final END_STREAM frame), and reads
+  the reply with `recv/2`. Verified end-to-end against a live ClickHouse.
+- **Bidirectional streaming (`stream_io/1`) actually works now.** Same
+  underlying stub-call bug, plus the gRPC stream is now driven from a single
+  owner process (gun delivers all stream messages to one process), so sending
+  and consuming replies no longer dead-locks. Verified end-to-end.
 - **CSV parsing** now correctly handles quoted fields containing commas,
   embedded quotes (`""`), and is symmetric with the library's CSV writer.
   Previously a naive comma split corrupted such rows.
@@ -39,6 +49,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Upgraded `grpc_connection_pool` to `~> 0.4.0`** (from `~> 0.2.1`). The 0.4.x
+  line is a rewrite with an ETS/atomics zero-GenServer hot path and pluggable
+  selection strategies; `Config.to_pool_config/1`'s `endpoint:`/`pool:` keyword
+  output remains compatible, so no application changes were required.
 - Public functions now read the application config once per call instead of
   twice (no behavior change).
 - `cancel_where/2` documents that its condition is interpolated verbatim and
@@ -52,13 +66,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (requires a `HEX_API_KEY` repository secret).
 - Added Credo (`.credo.exs`) and Dialyzer (`dialyxir`) to the toolchain.
 - Added `:telemetry` as a direct dependency; bumped `ex_doc` to `~> 0.34`.
-
-### Deferred
-
-- `grpc_connection_pool` `0.4.0` is available but is a significant rewrite
-  (ETS/atomics hot path, struct-based config, pluggable selection strategies).
-  Upgrading requires an API migration and integration testing against a live
-  ClickHouse server, so it is intentionally held at `~> 0.2.1` for this release.
+- Added an integration test suite (tagged `:integration`, excluded by default;
+  run with `mix test --include integration` against the docker-compose
+  ClickHouse) covering the request/response and streaming paths end-to-end.
 
 ## [0.3.0] - 2025
 

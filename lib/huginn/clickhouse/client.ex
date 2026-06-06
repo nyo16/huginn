@@ -248,13 +248,18 @@ defmodule Huginn.Clickhouse.Client do
     pool = Keyword.get(opts, :pool, config.pool_name)
     query_opts = Query.with_auth(opts, config)
 
-    input_stream = build_insert_stream(sql, data_stream, query_opts)
+    messages = build_insert_stream(sql, data_stream, query_opts)
 
     instrument(:insert_stream, sql, nil, pool, fn ->
-      with {:ok, channel} <- GrpcConnectionPool.get_channel(pool),
-           {:ok, grpc_result} <-
-             Stub.execute_query_with_stream_input(channel, input_stream) do
-        Result.from_grpc(grpc_result)
+      with {:ok, channel} <- GrpcConnectionPool.get_channel(pool) do
+        # ExecuteQueryWithStreamInput is a client-streaming RPC: the stub call
+        # opens the stream, each QueryInfo is pushed with `send_request/3`, and
+        # a final END_STREAM frame closes it. The reply is a single Result.
+        channel
+        |> Stub.execute_query_with_stream_input(grpc_opts(opts))
+        |> send_input_messages(messages)
+        |> GRPC.Stub.recv(grpc_opts(opts))
+        |> from_grpc_reply()
       end
     end)
   end
@@ -485,76 +490,77 @@ defmodule Huginn.Clickhouse.Client do
 
     case GrpcConnectionPool.get_channel(pool) do
       {:ok, channel} ->
-        {input_stream, send_fn} = create_send_stream()
+        # ExecuteQueryWithStreamIO is bidirectional, and the underlying gun
+        # stream is owned by a single process (it receives all stream messages).
+        # We therefore run the whole stream in one dedicated owner process:
+        # `send_fn` forwards QueryInfo messages to it, and the output stream
+        # pulls replies back. Sending and consuming can happen from any process.
+        owner = spawn_link(fn -> io_owner(channel, opts) end)
 
-        output_stream =
-          channel
-          |> Stub.execute_query_with_stream_io(input_stream)
-          |> parse_output_stream()
+        send_fn = fn query_info ->
+          send(owner, {:send, query_info})
+          :ok
+        end
 
-        {output_stream, send_fn}
+        {io_output_stream(owner), send_fn}
 
       {:error, _} = error ->
         error
     end
   end
 
-  defp create_send_stream do
-    {:ok, agent} = Agent.start_link(fn -> {:queue.new(), nil} end)
-
-    send_fn = fn query_info ->
-      Agent.update(agent, fn {queue, waiting} ->
-        case waiting do
-          nil ->
-            {:queue.in(query_info, queue), nil}
-
-          pid ->
-            send(pid, {:item, query_info})
-            {queue, nil}
-        end
-      end)
-
-      :ok
-    end
-
-    stream =
-      Stream.resource(
-        fn -> agent end,
-        fn agent ->
-          result =
-            Agent.get_and_update(agent, fn {queue, _} ->
-              case :queue.out(queue) do
-                {{:value, item}, new_queue} ->
-                  {item, {new_queue, nil}}
-
-                {:empty, queue} ->
-                  {nil, {queue, self()}}
-              end
-            end)
-
-          case result do
-            nil ->
-              receive do
-                {:item, item} -> {[item], agent}
-              after
-                100 -> {[], agent}
-              end
-
-            item ->
-              {[item], agent}
-          end
-        end,
-        fn agent -> Agent.stop(agent) end
-      )
-
-    {stream, send_fn}
+  # Owner process: opens the bidi stream, pushes queued QueryInfo messages, and
+  # once a consumer subscribes, half-closes the stream and forwards each reply.
+  defp io_owner(channel, opts) do
+    stream = Stub.execute_query_with_stream_io(channel, grpc_opts(opts))
+    io_owner_loop(stream, opts)
   end
 
-  defp parse_output_stream(stream) do
-    Stream.map(stream, fn
-      {:ok, grpc_result} -> Result.from_grpc(grpc_result)
-      {:error, _} = error -> error
-    end)
+  defp io_owner_loop(stream, opts) do
+    receive do
+      {:send, query_info} ->
+        io_owner_loop(GRPC.Stub.send_request(stream, query_info, []), opts)
+
+      {:recv, sub} ->
+        stream
+        |> GRPC.Stub.end_stream()
+        |> GRPC.Stub.recv(grpc_opts(opts))
+        |> io_forward(sub)
+
+      :stop ->
+        :ok
+    end
+  end
+
+  defp io_forward({:ok, replies}, sub), do: io_forward({:ok, replies, nil}, sub)
+
+  defp io_forward({:ok, replies, _headers}, sub) do
+    Enum.each(replies, fn reply -> send(sub, {:reply, self(), reply}) end)
+    send(sub, {:done, self()})
+  end
+
+  defp io_forward({:error, _} = error, sub) do
+    send(sub, {:reply, self(), error})
+    send(sub, {:done, self()})
+  end
+
+  defp io_output_stream(owner) do
+    Stream.resource(
+      fn ->
+        send(owner, {:recv, self()})
+        owner
+      end,
+      &next_io_reply/1,
+      fn owner -> send(owner, :stop) end
+    )
+  end
+
+  defp next_io_reply(owner) do
+    receive do
+      {:reply, ^owner, {:ok, grpc_result}} -> {[Result.from_grpc(grpc_result)], owner}
+      {:reply, ^owner, {:error, _} = error} -> {[error], owner}
+      {:done, ^owner} -> {:halt, owner}
+    end
   end
 
   # =============================================================================
@@ -709,4 +715,33 @@ defmodule Huginn.Clickhouse.Client do
       end
     end)
   end
+
+  # Pushes each QueryInfo onto a client-streaming gRPC stream and closes it.
+  #
+  # One message is buffered so we always know which is last: every non-final
+  # message is sent with `next_query_info: true` (ClickHouse keeps reading), and
+  # the final one is sent with `next_query_info: false` plus an END_STREAM frame.
+  # Buffering a single message keeps the send lazy for large inputs.
+  defp send_input_messages(grpc_stream, messages) do
+    case Enum.reduce(messages, {grpc_stream, :none}, &send_pending/2) do
+      {grpc_stream, :none} -> GRPC.Stub.end_stream(grpc_stream)
+      {grpc_stream, last} -> send_message(grpc_stream, last, false, end_stream: true)
+    end
+  end
+
+  defp send_pending(message, {grpc_stream, :none}), do: {grpc_stream, message}
+
+  defp send_pending(message, {grpc_stream, pending}) do
+    {send_message(grpc_stream, pending, true, []), message}
+  end
+
+  defp send_message(grpc_stream, message, next_query_info, opts) do
+    GRPC.Stub.send_request(grpc_stream, %{message | next_query_info: next_query_info}, opts)
+  end
+
+  # Normalizes a unary gRPC reply (client-streaming returns a single Result,
+  # optionally with headers when `:return_headers` is set).
+  defp from_grpc_reply({:ok, grpc_result}), do: Result.from_grpc(grpc_result)
+  defp from_grpc_reply({:ok, grpc_result, _headers}), do: Result.from_grpc(grpc_result)
+  defp from_grpc_reply({:error, _} = error), do: error
 end

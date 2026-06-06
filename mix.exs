@@ -17,10 +17,7 @@ defmodule Huginn.MixProject do
       name: "Huginn",
       source_url: @source_url,
       homepage_url: @source_url,
-      dialyzer: [
-        plt_file: {:no_warn, "priv/plts/project.plt"},
-        ignore_warnings: ".dialyzer_ignore.exs"
-      ]
+      dialyzer: [plt_file: {:no_warn, "priv/plts/project.plt"}]
     ]
   end
 
@@ -33,7 +30,7 @@ defmodule Huginn.MixProject do
 
   defp deps do
     [
-      {:grpc_connection_pool, "~> 0.2.1"},
+      {:grpc_connection_pool, "~> 0.4.0"},
       {:telemetry, "~> 1.0"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
