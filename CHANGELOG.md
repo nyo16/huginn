@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Upgraded `grpc_connection_pool` to `~> 0.4.0`** (from `~> 0.2.1`). The 0.4.x
   line is a rewrite with an ETS/atomics zero-GenServer hot path and pluggable
-  selection strategies; `Config.to_pool_config/1`'s `endpoint:`/`pool:` keyword
+  selection strategies; `Huginn.Clickhouse.Config.to_pool_config/1`'s `endpoint:`/`pool:` keyword
   output remains compatible, so no application changes were required.
 - Public functions now read the application config once per call instead of
   twice (no behavior change).
