@@ -3,9 +3,10 @@ defmodule Huginn.Clickhouse.Query do
   Builds QueryInfo messages for ClickHouse gRPC requests.
   """
 
-  alias Clickhouse.Grpc.QueryInfo
   alias Clickhouse.Grpc.ExternalTable
   alias Clickhouse.Grpc.NameAndType
+  alias Clickhouse.Grpc.QueryInfo
+  alias Huginn.Clickhouse.Config
 
   @type query_opts :: [
           database: String.t(),
@@ -122,9 +123,10 @@ defmodule Huginn.Clickhouse.Query do
   def build_external_table(name, columns, data, opts \\ []) do
     %ExternalTable{
       name: name,
-      columns: Enum.map(columns, fn {col_name, col_type} ->
-        %NameAndType{name: col_name, type: col_type}
-      end),
+      columns:
+        Enum.map(columns, fn {col_name, col_type} ->
+          %NameAndType{name: col_name, type: col_type}
+        end),
       data: data,
       format: Keyword.get(opts, :format, "TabSeparated"),
       compression_type: Keyword.get(opts, :compression, ""),
@@ -135,9 +137,9 @@ defmodule Huginn.Clickhouse.Query do
   @doc """
   Merges authentication options into query options.
   """
-  @spec with_auth(keyword(), Huginn.Clickhouse.Config.t()) :: keyword()
+  @spec with_auth(keyword(), Config.t()) :: keyword()
   def with_auth(opts, config) do
-    auth_opts = Huginn.Clickhouse.Config.auth_opts(config)
+    auth_opts = Config.auth_opts(config)
     Keyword.merge(auth_opts, opts)
   end
 

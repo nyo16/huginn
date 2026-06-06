@@ -14,6 +14,8 @@ ClickHouse client for Elixir using gRPC with connection pooling.
 - Both password and JWT authentication
 - Query cancellation support
 - Automatic result parsing
+- Telemetry instrumentation and an opt-in default logger
+- Opt-in retries for transient transport failures
 
 ## Installation
 
@@ -275,6 +277,50 @@ case Huginn.ping() do
   {:error, reason} -> IO.puts("Failed: #{inspect(reason)}")
 end
 ```
+
+## Telemetry
+
+Each request issued through `query/2`, `insert/3`, and `insert_stream/3` is
+wrapped in a [`:telemetry`](https://hexdocs.pm/telemetry) span:
+
+| Event | Measurements | Metadata |
+| ----- | ------------ | -------- |
+| `[:huginn, :query, :start]` | `:system_time`, `:monotonic_time` | `:method`, `:sql`, `:query_id`, `:pool` |
+| `[:huginn, :query, :stop]` | `:duration`, `:monotonic_time` | above + `:rows`, `:stats` (or `:error`) |
+| `[:huginn, :query, :exception]` | `:duration`, `:monotonic_time` | above + `:kind`, `:reason`, `:stacktrace` |
+
+Attach the built-in logger (off by default), or your own handler:
+
+```elixir
+# Logs each completed query with its duration; failures log at :error.
+Huginn.attach_default_logger(:info)
+
+# ...or attach a custom handler
+:telemetry.attach(
+  "my-handler",
+  [:huginn, :query, :stop],
+  fn _event, %{duration: d}, meta, _ ->
+    ms = System.convert_time_unit(d, :native, :millisecond)
+    MyMetrics.histogram("clickhouse.query.duration", ms, tags: [meta.method])
+  end,
+  nil
+)
+```
+
+See `Huginn.Clickhouse.Telemetry` for the full reference.
+
+## Retries
+
+`query/2` and `insert/3` can retry transient transport failures (connection
+errors and gRPC `UNAVAILABLE`/`DEADLINE_EXCEEDED`) with exponential backoff.
+Retries are off by default, and ClickHouse query errors are never retried.
+
+```elixir
+# Up to 3 extra attempts, backing off 100ms, 200ms, 400ms.
+Huginn.query("SELECT 1", retries: 3, retry_backoff: 100)
+```
+
+See `Huginn.Clickhouse.Retry` for details.
 
 ## Development
 

@@ -32,9 +32,22 @@ defmodule Huginn do
       Huginn.stream_query("SELECT * FROM large_table")
       |> Enum.each(&process_row/1)
 
+  ## Telemetry
+
+  Requests emit `[:huginn, :query, :start | :stop | :exception]` events. Attach
+  the built-in logger with `attach_default_logger/1`, or your own handler — see
+  `Huginn.Clickhouse.Telemetry` for the full event reference.
+
+  ## Retries
+
+  `query/2` and `insert/3` accept `:retries` and `:retry_backoff` options to
+  retry transient transport failures with exponential backoff. Retries are
+  off by default; ClickHouse query errors are never retried. See
+  `Huginn.Clickhouse.Retry`.
+
   """
 
-  alias Huginn.Clickhouse.Client
+  alias Huginn.Clickhouse.{Client, Telemetry}
 
   @doc """
   Executes a query and returns the result.
@@ -119,4 +132,18 @@ defmodule Huginn do
   See `Huginn.Clickhouse.Client.stream_io/1` for options.
   """
   defdelegate stream_io(opts \\ []), to: Client
+
+  @doc """
+  Attaches the built-in `Logger` handler for Huginn telemetry events.
+
+  See `Huginn.Clickhouse.Telemetry.attach_default_logger/1`.
+  """
+  defdelegate attach_default_logger(level \\ :info), to: Telemetry
+
+  @doc """
+  Detaches the built-in telemetry logger.
+
+  See `Huginn.Clickhouse.Telemetry.detach_default_logger/0`.
+  """
+  defdelegate detach_default_logger(), to: Telemetry
 end

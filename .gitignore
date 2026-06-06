@@ -22,3 +22,7 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 huginn-*.tar
 
+# Dialyzer PLT files (the priv/plts dir is kept via .gitkeep).
+/priv/plts/*.plt
+/priv/plts/*.plt.hash
+

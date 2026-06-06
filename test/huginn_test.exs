@@ -13,14 +13,15 @@ defmodule HuginnTest do
     end
 
     test "new/1 accepts all options" do
-      config = Config.new(
-        host: "clickhouse.example.com",
-        port: 9101,
-        database: "mydb",
-        auth: {:password, "user", "pass"},
-        pool_size: 10,
-        ssl: true
-      )
+      config =
+        Config.new(
+          host: "clickhouse.example.com",
+          port: 9101,
+          database: "mydb",
+          auth: {:password, "user", "pass"},
+          pool_size: 10,
+          ssl: true
+        )
 
       assert config.host == "clickhouse.example.com"
       assert config.port == 9101
@@ -76,12 +77,13 @@ defmodule HuginnTest do
     end
 
     test "build/2 accepts options" do
-      query_info = Query.build("SELECT 1",
-        database: "mydb",
-        format: "JSONEachRow",
-        user_name: "admin",
-        password: "secret"
-      )
+      query_info =
+        Query.build("SELECT 1",
+          database: "mydb",
+          format: "JSONEachRow",
+          user_name: "admin",
+          password: "secret"
+        )
 
       assert query_info.database == "mydb"
       assert query_info.output_format == "JSONEachRow"
@@ -143,9 +145,9 @@ defmodule HuginnTest do
       maps = Result.to_maps(result)
 
       assert maps == [
-        %{"name" => "alice", "age" => "25"},
-        %{"name" => "bob", "age" => "30"}
-      ]
+               %{"name" => "alice", "age" => "25"},
+               %{"name" => "bob", "age" => "30"}
+             ]
     end
 
     test "merge/1 combines multiple results" do
