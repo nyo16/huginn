@@ -14,9 +14,11 @@ defmodule Huginn.Application do
   end
 
   defp build_children do
-    # GRPC.Client.Supervisor must be started before any gRPC connections
-    [{GRPC.Client.Supervisor, []}]
-    |> maybe_add_clickhouse_pool()
+    # The `:grpc` application owns client supervision as of grpc 1.0
+    # (it starts GRPC.Client.Registry and the GRPC.Client.Supervisor
+    # DynamicSupervisor in its own tree), so Huginn only supervises the
+    # optional ClickHouse pool.
+    maybe_add_clickhouse_pool([])
   end
 
   defp maybe_add_clickhouse_pool(children) do

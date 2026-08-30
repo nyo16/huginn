@@ -1,7 +1,11 @@
 defmodule Clickhouse.Grpc.LogsLevel do
   @moduledoc false
 
-  use Protobuf, enum: true, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    enum: true,
+    full_name: "clickhouse.grpc.LogsLevel",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :LOG_NONE, 0
   field :LOG_FATAL, 1
@@ -12,12 +16,17 @@ defmodule Clickhouse.Grpc.LogsLevel do
   field :LOG_INFORMATION, 6
   field :LOG_DEBUG, 7
   field :LOG_TRACE, 8
+  field :LOG_TEST, 9
 end
 
 defmodule Clickhouse.Grpc.ObsoleteTransportCompression.CompressionAlgorithm do
   @moduledoc false
 
-  use Protobuf, enum: true, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    enum: true,
+    full_name: "clickhouse.grpc.ObsoleteTransportCompression.CompressionAlgorithm",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :NO_COMPRESSION, 0
   field :DEFLATE, 1
@@ -28,7 +37,11 @@ end
 defmodule Clickhouse.Grpc.ObsoleteTransportCompression.CompressionLevel do
   @moduledoc false
 
-  use Protobuf, enum: true, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    enum: true,
+    full_name: "clickhouse.grpc.ObsoleteTransportCompression.CompressionLevel",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :COMPRESSION_NONE, 0
   field :COMPRESSION_LOW, 1
@@ -39,7 +52,10 @@ end
 defmodule Clickhouse.Grpc.NameAndType do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.NameAndType",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :name, 1, type: :string
   field :type, 2, type: :string
@@ -48,7 +64,11 @@ end
 defmodule Clickhouse.Grpc.ExternalTable.SettingsEntry do
   @moduledoc false
 
-  use Protobuf, map: true, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.ExternalTable.SettingsEntry",
+    map: true,
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :key, 1, type: :string
   field :value, 2, type: :string
@@ -57,7 +77,10 @@ end
 defmodule Clickhouse.Grpc.ExternalTable do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.ExternalTable",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :name, 1, type: :string
   field :columns, 2, repeated: true, type: Clickhouse.Grpc.NameAndType
@@ -70,7 +93,10 @@ end
 defmodule Clickhouse.Grpc.ObsoleteTransportCompression do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.ObsoleteTransportCompression",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :algorithm, 1,
     type: Clickhouse.Grpc.ObsoleteTransportCompression.CompressionAlgorithm,
@@ -82,7 +108,11 @@ end
 defmodule Clickhouse.Grpc.QueryInfo.SettingsEntry do
   @moduledoc false
 
-  use Protobuf, map: true, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.QueryInfo.SettingsEntry",
+    map: true,
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :key, 1, type: :string
   field :value, 2, type: :string
@@ -91,7 +121,10 @@ end
 defmodule Clickhouse.Grpc.QueryInfo do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.QueryInfo",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :query, 1, type: :string
   field :query_id, 2, type: :string, json_name: "queryId"
@@ -132,7 +165,10 @@ end
 defmodule Clickhouse.Grpc.LogEntry do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.LogEntry",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :time, 1, type: :uint32
   field :time_microseconds, 2, type: :uint32, json_name: "timeMicroseconds"
@@ -146,7 +182,10 @@ end
 defmodule Clickhouse.Grpc.Progress do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.Progress",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :read_rows, 1, type: :uint64, json_name: "readRows"
   field :read_bytes, 2, type: :uint64, json_name: "readBytes"
@@ -158,7 +197,10 @@ end
 defmodule Clickhouse.Grpc.Stats do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.Stats",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :rows, 1, type: :uint64
   field :blocks, 2, type: :uint64
@@ -172,7 +214,10 @@ end
 defmodule Clickhouse.Grpc.Exception do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.Exception",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :code, 1, type: :int32
   field :name, 2, type: :string
@@ -183,7 +228,10 @@ end
 defmodule Clickhouse.Grpc.Result do
   @moduledoc false
 
-  use Protobuf, protoc_gen_elixir_version: "0.15.0", syntax: :proto3
+  use Protobuf,
+    full_name: "clickhouse.grpc.Result",
+    protoc_gen_elixir_version: "0.17.0",
+    syntax: :proto3
 
   field :query_id, 9, type: :string, json_name: "queryId"
   field :time_zone, 10, type: :string, json_name: "timeZone"
@@ -207,7 +255,7 @@ end
 defmodule Clickhouse.Grpc.ClickHouse.Service do
   @moduledoc false
 
-  use GRPC.Service, name: "clickhouse.grpc.ClickHouse", protoc_gen_elixir_version: "0.15.0"
+  use GRPC.Service, name: "clickhouse.grpc.ClickHouse", protoc_gen_elixir_version: "0.17.0"
 
   rpc :ExecuteQuery, Clickhouse.Grpc.QueryInfo, Clickhouse.Grpc.Result
 

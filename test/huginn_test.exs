@@ -57,12 +57,26 @@ defmodule HuginnTest do
       assert pool_config[:pool][:name] == :test_pool
     end
 
-    test "to_pool_config/1 generates pool config for ssl" do
+    test "to_pool_config/1 verifies the peer certificate when ssl: true" do
       config = Config.new(host: "secure.example.com", port: 443, ssl: true)
+      pool_config = Config.to_pool_config(config)
+      ssl = pool_config[:endpoint][:ssl]
+
+      assert pool_config[:endpoint][:type] == :production
+      # An empty list here would mean TLS without peer verification, which is
+      # `verify_none` on OTP < 26 and silently MITM-able.
+      assert ssl[:verify] == :verify_peer
+      assert is_list(ssl[:cacerts]) and ssl[:cacerts] != []
+      assert ssl[:customize_hostname_check] != nil
+    end
+
+    test "to_pool_config/1 passes explicit ssl options through verbatim" do
+      ssl = [verify: :verify_peer, cacertfile: "/tmp/ca.pem"]
+      config = Config.new(host: "secure.example.com", port: 443, ssl: ssl)
       pool_config = Config.to_pool_config(config)
 
       assert pool_config[:endpoint][:type] == :production
-      assert pool_config[:endpoint][:ssl] == []
+      assert pool_config[:endpoint][:ssl] == ssl
     end
   end
 

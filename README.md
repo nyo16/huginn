@@ -51,20 +51,35 @@ config :huginn, :clickhouse,
 | `:database` | `"default"` | Default database |
 | `:auth` | `nil` | `{:password, user, pass}` or `{:jwt, token}` |
 | `:pool_size` | `5` | Number of connections |
-| `:ssl` | `false` | Enable SSL/TLS |
+| `:ssl` | `false` | `true` verifies the peer against the system CA store; a keyword list is passed to `:ssl` verbatim |
 | `:pool_name` | `:clickhouse_pool` | Pool name for multiple pools |
 
 ### Production Configuration
 
+Use `config/runtime.exs`, not `config/prod.exs`. `config/prod.exs` is evaluated
+at *build* time, which bakes the ClickHouse password into the release. Reading
+secrets at runtime with `System.fetch_env!/1` also fails loudly on a missing
+variable instead of silently authenticating with an empty password.
+
 ```elixir
-# config/prod.exs
-config :huginn, :clickhouse,
-  host: System.get_env("CLICKHOUSE_HOST"),
-  port: String.to_integer(System.get_env("CLICKHOUSE_PORT", "9100")),
-  database: System.get_env("CLICKHOUSE_DATABASE", "default"),
-  auth: {:password, System.get_env("CLICKHOUSE_USER"), System.get_env("CLICKHOUSE_PASSWORD")},
-  pool_size: 10,
-  ssl: true
+# config/runtime.exs
+import Config
+
+if config_env() == :prod do
+  config :huginn, :clickhouse,
+    host: System.fetch_env!("CLICKHOUSE_HOST"),
+    port: String.to_integer(System.get_env("CLICKHOUSE_PORT", "9100")),
+    database: System.get_env("CLICKHOUSE_DATABASE", "default"),
+    auth: {:password, System.fetch_env!("CLICKHOUSE_USER"), System.fetch_env!("CLICKHOUSE_PASSWORD")},
+    pool_size: 10,
+    ssl: true
+end
+```
+
+For a private CA or client certificates, pass `:ssl` options through directly:
+
+```elixir
+  ssl: [verify: :verify_peer, cacertfile: "/etc/ssl/clickhouse-ca.pem"]
 ```
 
 ## Usage
@@ -356,17 +371,30 @@ mix docs
 
 ### Regenerate Proto Files
 
-If you need to regenerate the proto files after updating the `.proto` file:
+`priv/protos/clickhouse_grpc.proto` is vendored from
+[ClickHouse](https://github.com/ClickHouse/ClickHouse/blob/master/src/Server/grpc_protos/clickhouse_grpc.proto).
+To refresh it and regenerate the bindings:
 
 ```bash
-# Install protoc-gen-elixir
-mix escript.install hex protobuf
+# Pin the plugin to the `:protobuf` version in mix.lock so the generated code
+# and the runtime library never disagree.
+mix escript.install hex protobuf 0.17.0
 
-# Generate Elixir code
+curl -o priv/protos/clickhouse_grpc.proto \
+  https://raw.githubusercontent.com/ClickHouse/ClickHouse/master/src/Server/grpc_protos/clickhouse_grpc.proto
+
 protoc --elixir_out=plugins=grpc:./lib/huginn/proto \
   --proto_path=./priv/protos \
   clickhouse_grpc.proto
 ```
+
+The plugin nests output under the proto package, so the generated file lands at
+`lib/huginn/proto/clickhouse/grpc/clickhouse_grpc.pb.ex`. `mix format` skips
+`lib/huginn/proto/` (see `.formatter.exs`), so generated code is left as emitted.
+
+If the regenerated proto adds a `LogsLevel` member, the guard test in
+`test/huginn/clickhouse/result_test.exs` fails until it is mapped in
+`Huginn.Clickhouse.Result`.
 
 ## Architecture
 
@@ -377,9 +405,13 @@ lib/huginn/
 │   ├── config.ex      # Configuration management
 │   ├── query.ex       # QueryInfo message builders
 │   ├── result.ex      # Result parsing utilities
-│   └── stream.ex      # Streaming helpers
+│   ├── retry.ex       # Transient-failure retries
+│   ├── sql.ex         # SQL escaping helpers
+│   ├── stream.ex      # Streaming helpers
+│   └── telemetry.ex   # Telemetry events
 └── proto/
-    └── clickhouse_grpc.pb.ex  # Generated protobuf code
+    └── clickhouse/grpc/
+        └── clickhouse_grpc.pb.ex  # Generated protobuf code
 ```
 
 ## License

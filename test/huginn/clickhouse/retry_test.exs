@@ -96,6 +96,8 @@ defmodule Huginn.Clickhouse.RetryTest do
       assert Retry.transient?(:timeout)
       assert Retry.transient?(:unavailable)
       assert Retry.transient?(:no_channels)
+      # The only error GrpcConnectionPool.get_channel/1 returns.
+      assert Retry.transient?(:not_connected)
       assert Retry.transient?({:error, :closed})
     end
 

@@ -91,6 +91,30 @@ defmodule Huginn.Clickhouse.IntegrationTest do
     assert [%{"id" => _, "name" => _}] = maps
   end
 
+  test "stream_query/2 does not lose rows across multiple Result chunks" do
+    # 200k rows is large enough that ClickHouse splits the response into several
+    # Result messages. Only the first carries `output_format`/`output_columns`,
+    # so decoding each chunk in isolation collapsed every later chunk into a
+    # single opaque row and silently dropped ~2/3 of the rows.
+    n = 200_000
+
+    rows =
+      "SELECT number FROM system.numbers LIMIT #{n}"
+      |> Huginn.stream_rows(format: "TabSeparated")
+      |> Enum.count()
+
+    assert rows == n
+  end
+
+  test "stream_query/2 surfaces a connection failure instead of an empty stream" do
+    items =
+      "SELECT 1"
+      |> Huginn.stream_query(pool: :huginn_no_such_pool)
+      |> Enum.to_list()
+
+    assert [{:error, _}] = items
+  end
+
   test "stream_io/1 bidirectional send/recv" do
     {output, send} = Huginn.stream_io()
 

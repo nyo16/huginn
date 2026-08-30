@@ -5,6 +5,52 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Upgraded to gRPC 1.0.** `grpc_connection_pool ~> 0.5.2`, which brings
+  `grpc 1.0.4` (client/server split into separate packages) and `grpc_core
+  1.0.4`. Huginn's application module no longer starts `GRPC.Client.Supervisor`:
+  as of grpc 1.0 the `:grpc` application supervises client connections itself,
+  and the old child spec referenced a module that no longer exists, so the
+  application could not boot.
+- **Regenerated the ClickHouse protobuf bindings** from ClickHouse `master`
+  with `protoc-gen-elixir` 0.17.0. `LogsLevel` gains `LOG_TEST` (mapped to
+  `:test`), and the generated file now lives at
+  `lib/huginn/proto/clickhouse/grpc/clickhouse_grpc.pb.ex`.
+- **`:protobuf` and `:jason` are now declared dependencies.** grpc 1.0 no
+  longer depends on `:protobuf`, and `:jason` was only ever reached
+  transitively despite being used for `JSONEachRow`.
+- **`ssl: true` now verifies the peer certificate** against the system CA
+  store, and `:ssl` accepts a keyword list for a private CA or client
+  certificates. It previously sent `ssl: []`, which overrode the pool's own
+  verifying default and left `verify` unset — `verify_none` on OTP < 26.
+
+### Fixed
+
+- **`stream_query/2` silently dropped most rows of a large result.** ClickHouse
+  sets `output_format`/`output_columns` only on the *first* `Result` of a
+  stream; every later chunk was therefore parsed with an unknown format and
+  collapsed into a single opaque row. A 200,000-row query returned 65,412 rows.
+  The format and columns from the first chunk are now carried forward, and the
+  gRPC stream is enumerated exactly once instead of being restarted per chunk.
+- **`stream_query/2` swallowed connection failures**, returning an empty stream
+  instead of an `{:error, reason}` item.
+- **`insert_stream/3` ignored its documented `:format` and `:chunk_size`
+  options**, passing each element straight into `input_data`; structured rows
+  raised `Protobuf.EncodeError`. It now encodes and chunks via
+  `Huginn.Clickhouse.Stream.input_stream/3`, which also terminates every row
+  with a newline so adjacent chunks cannot merge rows.
+- **`input_stream/3` re-enumerated its source once per chunk** (`Enum.drop` +
+  `Enum.any?` lookahead), which was quadratic and re-ran side effects for
+  non-restartable sources such as `File.stream!/2`.
+- **Retries never fired for an unavailable pool.** `:not_connected`, the only
+  error `GrpcConnectionPool.get_channel/1` returns, was missing from the
+  transient set.
+- **A trailers-only gRPC reply** (`grpc-status 0` with no message) raised a
+  `FunctionClauseError` instead of returning `{:error, {:unexpected_reply, _}}`.
+
 ## [0.4.0] - 2026-06-06
 
 ### Added

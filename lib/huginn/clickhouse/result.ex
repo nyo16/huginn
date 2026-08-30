@@ -56,20 +56,39 @@ defmodule Huginn.Clickhouse.Result do
   Converts a gRPC Result message to a Huginn.Clickhouse.Result struct.
   """
   @spec from_grpc(struct()) :: {:ok, t()} | {:error, struct()}
-  def from_grpc(%GrpcResult{exception: %Exception{code: code} = exception})
+  def from_grpc(grpc_result), do: from_grpc(grpc_result, [])
+
+  @doc """
+  Converts a gRPC Result message, inheriting `:format` and `:columns` from an
+  earlier message in the same streaming response.
+
+  ClickHouse populates `output_format` and `output_columns` only on the *first*
+  `Result` of a stream; later chunks leave both empty. Parsing such a chunk in
+  isolation would fall through to the unknown-format clause of `parse_output/3`
+  and collapse the whole chunk into a single opaque row, so streaming callers
+  thread the values established by the first chunk.
+  """
+  @spec from_grpc(struct(), keyword()) :: {:ok, t()} | {:error, term()}
+  def from_grpc(%GrpcResult{exception: %Exception{code: code} = exception}, _defaults)
       when code != 0 do
     {:error, exception}
   end
 
-  def from_grpc(%GrpcResult{} = grpc_result) do
-    columns = parse_columns(grpc_result.output_columns)
+  def from_grpc(%GrpcResult{} = grpc_result, defaults) do
+    format = presence(grpc_result.output_format) || Keyword.get(defaults, :format)
+
+    columns =
+      case parse_columns(grpc_result.output_columns) do
+        [] -> Keyword.get(defaults, :columns, [])
+        parsed -> parsed
+      end
 
     result = %__MODULE__{
       query_id: grpc_result.query_id,
-      output_format: grpc_result.output_format,
+      output_format: format,
       time_zone: grpc_result.time_zone,
       columns: columns,
-      rows: parse_output(grpc_result.output, grpc_result.output_format, columns),
+      rows: parse_output(grpc_result.output, format, columns),
       stats: parse_stats(grpc_result.stats),
       progress: parse_progress(grpc_result.progress),
       logs: parse_logs(grpc_result.logs)
@@ -77,6 +96,10 @@ defmodule Huginn.Clickhouse.Result do
 
     {:ok, result}
   end
+
+  # A trailers-only reply (grpc-status 0 carrying no message) decodes to `[]`
+  # rather than a Result, so surface it as an error instead of raising.
+  def from_grpc(other, _defaults), do: {:error, {:unexpected_reply, other}}
 
   @doc """
   Converts rows to a list of maps using column names as keys.
@@ -165,6 +188,10 @@ defmodule Huginn.Clickhouse.Result do
     }
   end
 
+  defp presence(nil), do: nil
+  defp presence(""), do: nil
+  defp presence(value), do: value
+
   defp parse_columns(nil), do: []
   defp parse_columns([]), do: []
 
@@ -220,6 +247,7 @@ defmodule Huginn.Clickhouse.Result do
   defp log_level_to_atom(:LOG_INFORMATION), do: :info
   defp log_level_to_atom(:LOG_DEBUG), do: :debug
   defp log_level_to_atom(:LOG_TRACE), do: :trace
+  defp log_level_to_atom(:LOG_TEST), do: :test
   defp log_level_to_atom(_), do: :unknown
 
   # Parses a single CSV line, honoring double-quoted fields. Commas, quotes and
