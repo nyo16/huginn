@@ -5,7 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-08-29
+
+### Breaking
+
+- **`ssl: true` now verifies the peer certificate.** It previously sent
+  `ssl: []`, which is truthy and so overrode the connection pool's own
+  verifying default, leaving `verify` unset — `verify_none` on OTP < 26. A
+  connection to a server with a self-signed or otherwise untrusted certificate
+  that used to succeed will now fail during the TLS handshake. That is the
+  point, but it is a visible break. To keep connecting, supply the trust chain
+  explicitly: `ssl: [verify: :verify_peer, cacertfile: "/path/to/ca.pem"]`.
+- **`insert_stream/3` now honours `:format` and `:chunk_size`.** Both were
+  previously ignored: every element of the enumerable was sent verbatim as
+  `input_data`, so structured rows raised `Protobuf.EncodeError` and neither
+  option had any effect. Elements that are already binaries are still
+  concatenated verbatim, so `File.stream!/2` pipelines are unaffected. If you
+  pass structured rows, make sure the SQL `FORMAT` clause matches `:format`
+  (which defaults to `"TabSeparated"`) — a mismatch is now a ClickHouse parse
+  error rather than a silent no-op.
+- **`stream_query/2` now emits `{:error, reason}` instead of ending empty.** On
+  a connection failure it previously produced an empty stream, indistinguishable
+  from an empty result set. Consumers that match only `{:ok, result}` will now
+  raise on the error element instead of silently observing zero rows.
 
 ### Changed
 
@@ -22,10 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`:protobuf` and `:jason` are now declared dependencies.** grpc 1.0 no
   longer depends on `:protobuf`, and `:jason` was only ever reached
   transitively despite being used for `JSONEachRow`.
-- **`ssl: true` now verifies the peer certificate** against the system CA
-  store, and `:ssl` accepts a keyword list for a private CA or client
-  certificates. It previously sent `ssl: []`, which overrode the pool's own
-  verifying default and left `verify` unset — `verify_none` on OTP < 26.
+- **`Huginn.Clickhouse.Result.output_format` is now `nil` rather than `""`** when
+  the server omits it — which it does on every chunk after the first of a
+  streaming response. Code pattern-matching on `""` needs updating.
+- **Added `Huginn.Clickhouse.Result.from_grpc/2`**, which accepts `:format` and
+  `:columns` defaults so a streaming consumer can decode a later chunk with the
+  metadata established by the first one. `from_grpc/1` is unchanged.
 
 ### Fixed
 
@@ -123,5 +147,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ExecuteQueryWithStreamOutput`, `ExecuteQueryWithStreamIO`), connection
   pooling, password/JWT auth, query cancellation, and result parsing.
 
+[0.5.0]: https://github.com/nyo16/huginn/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/nyo16/huginn/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/nyo16/huginn/releases/tag/v0.3.0
