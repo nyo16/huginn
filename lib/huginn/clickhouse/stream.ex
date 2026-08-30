@@ -11,25 +11,35 @@ defmodule Huginn.Clickhouse.Stream do
   alias Huginn.Clickhouse.{Query, Result}
 
   @doc """
-  Creates an input stream from an enumerable of data chunks.
+  Builds a lazy stream of `QueryInfo` messages for a streaming insert.
 
-  The first QueryInfo contains the SQL query, subsequent ones contain data.
+  The first message carries the SQL query plus the first data chunk; every
+  later message carries only data. The source is enumerated exactly once, so
+  non-restartable sources (`File.stream!/2`, a `Stream.map/2` with side
+  effects) are safe.
 
   ## Options
 
-    * `:chunk_size` - Number of rows per chunk (for lists)
+    * `:chunk_size` - Elements per chunk (default: 1000)
     * `:format` - Input data format (default: "TabSeparated")
     * All options from `Query.build/2`
 
+  Elements that are already encoded binaries are concatenated verbatim, so the
+  caller's own framing is preserved. Structured rows are encoded according to
+  `:format`.
+
+  `next_query_info` is set by `Huginn.Clickhouse.Client.insert_stream/3`, which
+  knows which message is last.
+
   ## Examples
 
-      # Stream from a list of rows
+      # Structured rows, encoded by this module
       rows = [["a", "1"], ["b", "2"], ["c", "3"]]
-      stream = Stream.input_stream("INSERT INTO t VALUES", rows, format: "TabSeparated")
+      input_stream("INSERT INTO t FORMAT TabSeparated", rows)
 
-      # Stream from a file
-      File.stream!("data.csv")
-      |> Stream.input_stream("INSERT INTO t FORMAT CSV", format: "CSV")
+      # Pre-encoded chunks, passed through untouched
+      File.stream!("data.csv", [], 65_536)
+      |> then(&input_stream("INSERT INTO t FORMAT CSV", &1, chunk_size: 1))
 
   """
   @spec input_stream(String.t(), Enumerable.t(), keyword()) :: Enumerable.t(struct())
@@ -37,42 +47,14 @@ defmodule Huginn.Clickhouse.Stream do
     format = Keyword.get(opts, :format, "TabSeparated")
     chunk_size = Keyword.get(opts, :chunk_size, 1000)
 
-    Stream.concat(
-      # First message: query with initial data
-      Stream.resource(
-        fn -> {data_enum, true} end,
-        fn
-          {enum, true} ->
-            case Enum.take(enum, chunk_size) do
-              [] ->
-                {:halt, nil}
-
-              chunk ->
-                data = encode_chunk(chunk, format)
-                query_info = Query.build_insert(sql, data, opts)
-                remaining = Enum.drop(enum, chunk_size)
-                has_more = Enum.any?(remaining)
-                query_info = %{query_info | next_query_info: has_more}
-                {[query_info], {remaining, false}}
-            end
-
-          {enum, false} ->
-            case Enum.take(enum, chunk_size) do
-              [] ->
-                {:halt, nil}
-
-              chunk ->
-                data = encode_chunk(chunk, format)
-                remaining = Enum.drop(enum, chunk_size)
-                has_more = Enum.any?(remaining)
-                query_info = Query.build_continuation(data, has_more: has_more)
-                {[query_info], {remaining, false}}
-            end
-        end,
-        fn _ -> :ok end
-      ),
-      []
-    )
+    data_enum
+    |> Stream.chunk_every(chunk_size)
+    |> Stream.map(&encode_chunk(&1, format))
+    |> Stream.with_index()
+    |> Stream.map(fn
+      {data, 0} -> Query.build_insert(sql, data, opts)
+      {data, _} -> Query.build_continuation(data, has_more: true)
+    end)
   end
 
   @doc """
@@ -155,23 +137,29 @@ defmodule Huginn.Clickhouse.Stream do
     end)
   end
 
-  defp encode_chunk(chunk, "TabSeparated") when is_list(chunk) do
-    Enum.map_join(chunk, "\n", fn row -> Enum.join(row, "\t") end)
+  # Already-encoded binaries are concatenated verbatim so the caller's framing
+  # survives. Structured rows get a trailing newline on every row, otherwise
+  # concatenating adjacent chunks would merge the last row of one chunk into
+  # the first row of the next (ClickHouse joins `input_data` across QueryInfos).
+  defp encode_chunk([head | _] = chunk, _format) when is_binary(head) do
+    IO.iodata_to_binary(chunk)
   end
 
-  defp encode_chunk(chunk, "CSV") when is_list(chunk) do
-    Enum.map_join(chunk, "\n", fn row ->
-      Enum.map_join(row, ",", &encode_csv_field/1)
-    end)
+  defp encode_chunk(chunk, format) do
+    Enum.map_join(chunk, fn row -> encode_row(row, format) <> "\n" end)
   end
 
-  defp encode_chunk(chunk, "JSONEachRow") when is_list(chunk) do
-    Enum.map_join(chunk, "\n", &Jason.encode!/1)
+  defp encode_row(row, format) when format in ["TabSeparated", "TSV"] do
+    Enum.join(row, "\t")
   end
 
-  # Chunks always arrive as lists here (they come from `Enum.take/2` in
-  # `input_stream/3`), so an unknown format just joins the rows with newlines.
-  defp encode_chunk(chunk, _format) when is_list(chunk), do: Enum.join(chunk, "\n")
+  defp encode_row(row, format) when format in ["CSV", "CSVWithNames"] do
+    Enum.map_join(row, ",", &encode_csv_field/1)
+  end
+
+  defp encode_row(row, "JSONEachRow"), do: Jason.encode!(row)
+
+  defp encode_row(row, _format), do: Enum.join(row, "\t")
 
   defp encode_csv_field(field) when is_binary(field) do
     if String.contains?(field, [",", "\"", "\n"]) do

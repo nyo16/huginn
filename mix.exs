@@ -1,7 +1,7 @@
 defmodule Huginn.MixProject do
   use Mix.Project
 
-  @version "0.4.0"
+  @version "0.5.0"
   @source_url "https://github.com/nyo16/huginn"
 
   def project do
@@ -30,7 +30,9 @@ defmodule Huginn.MixProject do
 
   defp deps do
     [
-      {:grpc_connection_pool, "~> 0.4.0"},
+      {:grpc_connection_pool, "~> 0.5.2"},
+      {:protobuf, "~> 0.17"},
+      {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

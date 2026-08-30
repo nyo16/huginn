@@ -248,7 +248,7 @@ defmodule Huginn.Clickhouse.Client do
     pool = Keyword.get(opts, :pool, config.pool_name)
     query_opts = Query.with_auth(opts, config)
 
-    messages = build_insert_stream(sql, data_stream, query_opts)
+    messages = Huginn.Clickhouse.Stream.input_stream(sql, data_stream, query_opts)
 
     instrument(:insert_stream, sql, nil, pool, fn ->
       with {:ok, channel} <- GrpcConnectionPool.get_channel(pool) do
@@ -332,11 +332,17 @@ defmodule Huginn.Clickhouse.Client do
     query_opts = Query.with_auth(opts, config)
     query_info = Query.build(sql, query_opts)
 
-    Stream.resource(
-      fn -> init_stream(pool, query_info, opts) end,
-      &next_stream_chunk/1,
-      fn _ -> :ok end
-    )
+    # `flat_map` over a single seed keeps initialization lazy (nothing connects
+    # until the stream is enumerated) while enumerating the gRPC stream exactly
+    # once. Enumerating it more than once restarts gun's decode unfold from its
+    # initial empty buffer, silently dropping every message after the first in
+    # each DATA frame.
+    Stream.flat_map([:init], fn :init ->
+      case init_stream(pool, query_info, opts) do
+        {:stream, stream} -> decode_output_stream(stream)
+        {:error, reason} -> [{:error, reason}]
+      end
+    end)
   end
 
   defp init_stream(pool, query_info, opts) do
@@ -352,29 +358,24 @@ defmodule Huginn.Clickhouse.Client do
     end
   end
 
-  defp next_stream_chunk({:error, reason}) do
-    {:halt, {:error, reason}}
+  # ClickHouse sets `output_format` and `output_columns` only on the first
+  # Result of a streaming response, so each chunk after it must be decoded with
+  # the format and columns established by that first chunk. Without this the
+  # later chunks hit the unknown-format clause and collapse into one opaque row.
+  defp decode_output_stream(stream) do
+    Stream.transform(stream, %{format: nil, columns: []}, &decode_output_chunk/2)
   end
 
-  defp next_stream_chunk({:stream, stream}) do
-    case Enum.take(stream, 1) do
-      [] ->
-        {:halt, :done}
+  defp decode_output_chunk({:error, _} = error, acc), do: {[error], acc}
+  defp decode_output_chunk({:ok, grpc_result}, acc), do: decode_output_chunk(grpc_result, acc)
 
-      [{:ok, grpc_result}] ->
-        case Result.from_grpc(grpc_result) do
-          {:ok, result} -> {[{:ok, result}], {:stream, stream}}
-          {:error, _} = error -> {[error], {:stream, stream}}
-        end
+  defp decode_output_chunk(grpc_result, acc) do
+    case Result.from_grpc(grpc_result, format: acc.format, columns: acc.columns) do
+      {:ok, result} ->
+        {[{:ok, result}], %{format: result.output_format, columns: result.columns}}
 
-      [{:error, _} = error] ->
-        {[error], {:stream, stream}}
-
-      [grpc_result] ->
-        case Result.from_grpc(grpc_result) do
-          {:ok, result} -> {[{:ok, result}], {:stream, stream}}
-          {:error, _} = error -> {[error], {:stream, stream}}
-        end
+      {:error, _} = error ->
+        {[error], acc}
     end
   end
 
@@ -701,18 +702,6 @@ defmodule Huginn.Clickhouse.Client do
         end
 
       {result, Map.merge(metadata, extra)}
-    end)
-  end
-
-  defp build_insert_stream(sql, data_stream, opts) do
-    data_stream
-    |> Stream.with_index()
-    |> Stream.map(fn {data, index} ->
-      if index == 0 do
-        Query.build_insert(sql, data, opts)
-      else
-        Query.build_continuation(data, has_more: true)
-      end
     end)
   end
 

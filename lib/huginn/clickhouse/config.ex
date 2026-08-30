@@ -33,7 +33,7 @@ defmodule Huginn.Clickhouse.Config do
           auth: auth | nil,
           pool_size: non_neg_integer(),
           pool_name: atom(),
-          ssl: boolean(),
+          ssl: boolean() | keyword(),
           compression: String.t() | nil
         }
 
@@ -59,7 +59,10 @@ defmodule Huginn.Clickhouse.Config do
     * `:auth` - Authentication tuple: `{:password, user, pass}` or `{:jwt, token}`
     * `:pool_size` - Connection pool size (default: 5)
     * `:pool_name` - Pool name for registration (default: :clickhouse_pool)
-    * `:ssl` - Enable SSL/TLS (default: false)
+    * `:ssl` - `false` (default) for plaintext h2c, `true` to enable TLS with
+      peer verification against the system CA store, or a keyword list of
+      `:ssl` options (e.g. `[verify: :verify_peer, cacertfile: "/ca.pem"]`)
+      passed through verbatim for custom CAs or client certificates.
     * `:compression` - Output compression type: "gzip", "lz4", "zstd", etc.
 
   """
@@ -116,19 +119,12 @@ defmodule Huginn.Clickhouse.Config do
   @spec to_pool_config(t()) :: keyword()
   def to_pool_config(%__MODULE__{} = config) do
     endpoint_opts =
-      if config.ssl do
-        [
-          type: :production,
-          host: config.host,
-          port: config.port,
-          ssl: []
-        ]
-      else
-        [
-          type: :local,
-          host: config.host,
-          port: config.port
-        ]
+      case ssl_opts(config.ssl) do
+        nil ->
+          [type: :local, host: config.host, port: config.port]
+
+        opts ->
+          [type: :production, host: config.host, port: config.port, ssl: opts]
       end
 
     pool_opts = [
@@ -141,6 +137,24 @@ defmodule Huginn.Clickhouse.Config do
       pool: pool_opts
     ]
   end
+
+  # `ssl: true` must mean "verify the peer", not "TLS with no options". Passing
+  # `ssl: []` would defeat the pool's own secure default, because it resolves
+  # the endpoint as `opts[:ssl] || default_production_ssl()` and an empty list
+  # is truthy — leaving `verify` unset, which is `verify_none` on OTP < 26.
+  defp ssl_opts(false), do: nil
+  defp ssl_opts(nil), do: nil
+
+  defp ssl_opts(true) do
+    # The pool gates its verifying defaults behind
+    # `function_exported?(:public_key, :cacerts_get, 0)`, which reports false for
+    # a module that merely has not been loaded yet. Without forcing the load,
+    # `ssl: true` silently degrades to unverified TLS on a perfectly modern OTP.
+    Code.ensure_loaded?(:public_key)
+    GrpcConnectionPool.Config.default_production_ssl()
+  end
+
+  defp ssl_opts(opts) when is_list(opts), do: opts
 
   @doc """
   Extracts authentication credentials for query building.

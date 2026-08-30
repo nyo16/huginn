@@ -17,7 +17,17 @@ defmodule Huginn.Clickhouse.Retry do
     14
   ]
 
-  @transient_reasons [:timeout, :closed, :no_channels, :unavailable, :econnrefused]
+  # `:not_connected` is what GrpcConnectionPool.get_channel/1 returns when no
+  # channel is ready — the most common transient failure on this path, and the
+  # one that previously fell through to non-transient.
+  @transient_reasons [
+    :not_connected,
+    :no_channels,
+    :timeout,
+    :closed,
+    :unavailable,
+    :econnrefused
+  ]
 
   @doc """
   Runs `fun` and retries on transient errors.
