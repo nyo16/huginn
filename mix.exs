@@ -34,6 +34,7 @@ defmodule Huginn.MixProject do
     [
       {:grpc, "~> 1.0.5"},
       {:grpc_connection_pool, "~> 0.5.3"},
+      {:mint, "~> 1.11"},
       {:protobuf, "~> 0.17.1"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},

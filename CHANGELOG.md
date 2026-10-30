@@ -89,8 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored, so queries ran against the user's default database.
 - **Stopping a stream early cancels the server query.** This covers
   `Enum.take/2`, an exception, or the consumer process dying. `stream_query/2`
-  now runs over `ExecuteQueryWithStreamIO` with the input side closed, which
-  grpc can cancel. A raising `insert_stream/3` source cancels the insert.
+  now runs over `ExecuteQueryWithStreamIO` with the input side closed. A
+  raising `insert_stream/3` source cancels the insert.
+- **Streaming is flow-controlled in both directions, so memory stays
+  bounded.** grpc-elixir's gun adapter refilled the HTTP/2 receive window on
+  its own and sent input without waiting for the send window, so a slow
+  consumer buffered the whole result and a fast source buffered the whole
+  input. `insert_stream/3`, `stream_query/2` and `stream_io/3` now run on
+  their own HTTP/2 connection (Mint, passive mode) that is only read as fast
+  as the stream is consumed and only written as fast as the server grants
+  window. Unary calls still use the pool. Reading a large result is also
+  about 3.5× faster.
+- Cancelling a stream no longer logs grpc's `received unexpected message:
+  {:gun_error, ..., :badstate, ...}` warning, because stream cancellation no
+  longer goes through grpc's shared connection process.
 - **Credentials no longer leak.** `inspect/1` on a config hides `:auth`, and
   boot and validation errors don't echo the options.
 - `stream_query/2` reads replies lazily, one at a time, and no longer falls
@@ -108,6 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CVE-2026-43969, which were not reachable from huginn), plus dev-tool patch
   updates.
 - Test coverage excludes the generated `Clickhouse.Grpc.*` modules.
+- New runtime dependency `:mint` `~> 1.11` for the streaming transport.
 
 ### CI
 

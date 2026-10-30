@@ -72,6 +72,27 @@ defmodule Huginn.Clickhouse.IntegrationTest do
     end
   end
 
+  # Samples the query's `read_rows` until two samples 200 ms apart agree, i.e.
+  # the server has stopped producing. Returns that row count.
+  defp assert_query_stalls(query_id, previous \\ nil, attempts \\ 50) do
+    Process.sleep(200)
+    sql = "SELECT read_rows FROM system.processes WHERE query_id = '#{query_id}'"
+
+    case Huginn.query!(sql).rows do
+      [[^previous]] ->
+        String.to_integer(previous)
+
+      [[rows]] when attempts > 0 ->
+        assert_query_stalls(query_id, rows, attempts - 1)
+
+      [[rows]] ->
+        flunk("query #{query_id} never stalled, it has read #{rows} rows")
+
+      [] ->
+        flunk("query #{query_id} ran to the end: its result was buffered, not throttled")
+    end
+  end
+
   @doc false
   def forward_event(event, _measurements, %{query_id: id} = meta, %{pid: pid, query_id: id}),
     do: send(pid, {:event, event, meta})
@@ -229,6 +250,28 @@ defmodule Huginn.Clickhouse.IntegrationTest do
       assert_receive :consuming, 5_000
       Process.exit(consumer, :kill)
 
+      assert_query_finishes(query_id)
+    end
+
+    test "a consumer that stops reading stalls the query instead of buffering its result" do
+      query_id = unique_query_id()
+      total = 100_000_000
+
+      # ~100 GB of output if it ran to the end.
+      sql = "SELECT number, repeat('x', 1000) FROM numbers(#{total})"
+
+      # Take one element and keep the stream suspended: nothing reads the
+      # connection until it is resumed.
+      assert {:suspended, {:ok, _first}, continuation} =
+               sql
+               |> Huginn.stream_query(query_id: query_id)
+               |> Enumerable.reduce({:cont, nil}, fn element, _acc -> {:suspend, element} end)
+
+      assert assert_query_stalls(query_id) < total
+
+      # Resuming reads on; halting cancels the query.
+      assert {:suspended, {:ok, _second}, continuation} = continuation.({:cont, nil})
+      continuation.({:halt, nil})
       assert_query_finishes(query_id)
     end
   end

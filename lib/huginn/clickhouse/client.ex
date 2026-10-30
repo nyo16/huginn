@@ -15,11 +15,15 @@ defmodule Huginn.Clickhouse.Client do
   | `ExecuteQueryWithStreamInput` | `insert_stream/3` | Large or continuous inserts |
   | `ExecuteQueryWithStreamIO` | `stream_query/2`, `stream_io/3` | Large results; inserts that report back while running |
 
-  `stream_query/2` sends its single `QueryInfo` over `ExecuteQueryWithStreamIO`
-  and closes the input side right away, which ClickHouse handles exactly like
-  `ExecuteQueryWithStreamOutput`. It does so because grpc-elixir only returns a
-  cancellable stream handle for request-streaming calls, and the handle is what
-  lets an abandoned stream cancel its query.
+  The streaming functions (`insert_stream/3`, `stream_query/2`,
+  `stream_io/3`) do not use the pool's connections: each call opens its own
+  HTTP/2 connection to the pool's server, with the pool's TLS settings and
+  credentials, and closes it when the call ends. That connection is
+  flow-controlled in both directions (see "Streaming and memory"), and a slow
+  consumer stalling it stalls no other query. `stream_query/2` sends its
+  single `QueryInfo` over `ExecuteQueryWithStreamIO` and closes the input side
+  right away, which ClickHouse handles exactly like
+  `ExecuteQueryWithStreamOutput`.
 
   ## Errors
 
@@ -40,25 +44,25 @@ defmodule Huginn.Clickhouse.Client do
 
   `:retries` (default `0`), `:retry_backoff` and `:retry_max_backoff` retry
   `%Huginn.Error{reason: :connection}` failures, see `Huginn.Clickhouse.Retry`.
-  `query/2` repeats the whole request. Inserts and streams repeat only channel
-  acquisition, so nothing that reached the server is ever sent twice.
+  `query/2` repeats the whole request. Inserts and streams repeat only
+  acquiring a connection, so nothing that reached the server is ever sent twice.
 
   ## Streaming and memory
 
-  Streams are lazy and enumerate the RPC exactly once. Stopping early (e.g.
-  `Enum.take/2`, `Enum.find/2`, an exception) cancels the RPC, and so does the
-  consuming process exiting, so ClickHouse stops the query. Two limits remain:
-  they sit in grpc-elixir's gun adapter, not in Huginn.
+  Streams are lazy and enumerate the call exactly once. Stopping early (e.g.
+  `Enum.take/2`, `Enum.find/2`, an exception) cancels the call, and so does the
+  consuming process exiting (it owns the connection), so ClickHouse stops the
+  query. Memory is bounded in both directions:
 
-    * **Receive side.** gun refills the HTTP/2 flow-control window on its own,
-      so the server is never slowed down by a slow consumer. The result is
-      buffered in memory as fast as the server produces it. Bound large
-      exports with `LIMIT` or the `max_result_bytes`/`max_result_rows`
-      settings.
-    * **Send side.** Each input message is handed to the connection process
-      without waiting for the HTTP/2 send window. A source that is faster than
-      the network piles up in memory. Feed `insert_stream/3` and `stream_io/3`
-      from a source that is not much faster than the server ingests.
+    * **Receive side.** The connection is only read when the consumer asks
+      for the next element. A consumer slower than the server makes TCP and
+      HTTP/2 flow control push back, and ClickHouse waits instead of the
+      result piling up in memory. At most what one socket read returns is
+      buffered.
+    * **Send side.** Input is pulled from the source one message (about
+      `:chunk_size` bytes) at a time, and the next message is only pulled once
+      the previous one fits in the server's HTTP/2 flow-control window. A
+      source faster than the server waits for it.
 
   ## Examples
 
@@ -78,7 +82,7 @@ defmodule Huginn.Clickhouse.Client do
   """
 
   alias Clickhouse.Grpc.ClickHouse.Stub
-  alias Huginn.Clickhouse.{Config, Query, Result, Retry, SQL}
+  alias Huginn.Clickhouse.{Config, Query, Result, Retry, SQL, Transport}
 
   @unary_timeout 60_000
   @stream_timeout :infinity
@@ -225,9 +229,9 @@ defmodule Huginn.Clickhouse.Client do
   Inserts an enumerable of rows or encoded chunks using the
   `ExecuteQueryWithStreamInput` gRPC method.
 
-  `data` is enumerated once, lazily. Elements are packed into messages of
-  about `:chunk_size` bytes, so memory stays bounded by the message size
-  (see "Streaming and memory" in the module docs for the send-side caveat):
+  `data` is enumerated once, lazily, and only as fast as the server ingests
+  it. Elements are packed into messages of about `:chunk_size` bytes, and one
+  message at a time is held in memory:
 
     * binaries are sent verbatim, so they must already be encoded in the
       format named by the `FORMAT` clause of `sql`
@@ -245,7 +249,7 @@ defmodule Huginn.Clickhouse.Client do
       It must match the `FORMAT` clause of `sql`.
     * `:timeout` - deadline in milliseconds (default: `:infinity`)
     * All other options from `query/2`. As with `insert/3`, `:retries` only
-      retries acquiring a channel.
+      retries acquiring a connection.
 
   ## Examples
 
@@ -278,11 +282,11 @@ defmodule Huginn.Clickhouse.Client do
 
     instrument(:insert_stream, sql, query_id, pool, fn metadata ->
       with {:ok, config} <- Config.fetch(pool),
-           {:ok, channel} <- checkout_with_retry(pool, opts, metadata) do
+           {:ok, transport} <- open_call(config, "ExecuteQueryWithStreamInput", opts, metadata) do
         messages =
           Huginn.Clickhouse.Stream.input_stream(sql, data, query_opts(opts, config, query_id))
 
-        stream_insert(channel, messages, stream_timeout(opts))
+        run_insert(transport, messages)
       end
     end)
   end
@@ -302,15 +306,15 @@ defmodule Huginn.Clickhouse.Client do
   element.
 
   Stopping early (`Enum.take/2`, `Stream.take_while/2`, an exception) or the
-  consuming process exiting cancels the RPC, and ClickHouse stops the query
-  the next time it sends a block or progress update. The receive side is not
-  flow-controlled, see "Streaming and memory" in the module docs. Bound large
-  exports with `LIMIT` or the `max_result_bytes` setting.
+  consuming process exiting cancels the call, and ClickHouse stops the query.
+  The server is only read as fast as the stream is consumed, so a slow
+  consumer slows the query down rather than buffering its result, see
+  "Streaming and memory" in the module docs.
 
   ## Options
 
   All options from `query/2`, except that `:timeout` defaults to `:infinity`
-  and `:retries` only retries acquiring a channel.
+  and `:retries` only retries acquiring a connection.
 
   ## Examples
 
@@ -331,9 +335,17 @@ defmodule Huginn.Clickhouse.Client do
   def stream_query(sql, opts \\ []) do
     {pool, query_id} = target(opts)
 
-    output_stream(:stream_query, sql, query_id, pool, opts, fn channel, config ->
-      query_info = Query.build(sql, query_opts(opts, config, query_id))
-      open_io(channel, [query_info], stream_timeout(opts))
+    output_stream(:stream_query, sql, query_id, pool, fn config, metadata ->
+      with {:ok, transport} <- open_call(config, "ExecuteQueryWithStreamIO", opts, metadata) do
+        query_info = Query.build(sql, query_opts(opts, config, query_id))
+
+        transport =
+          transport
+          |> Transport.put_message(%{query_info | next_query_info: false})
+          |> Transport.finish_input()
+
+        {:ok, %{transport: transport, input: nil, pending: nil}}
+      end
     end)
   end
 
@@ -408,10 +420,10 @@ defmodule Huginn.Clickhouse.Client do
   `stream_query/2`: a failure is the last element, and stopping early cancels
   the query.
 
-  `input` is enumerated, and fully handed to the connection, when enumeration
-  of the result starts and before the first reply is read. Replies that arrive
-  meanwhile are buffered. `:format` describes the *input* rows, as in
-  `insert_stream/3`.
+  `input` is enumerated while the result is consumed: one message is pulled
+  from it only once the previous one has fit in the server's flow-control
+  window, and replies are yielded as they arrive in between. `:format`
+  describes the *input* rows, as in `insert_stream/3`.
 
   ## Options
 
@@ -433,11 +445,13 @@ defmodule Huginn.Clickhouse.Client do
   def stream_io(sql, input, opts \\ []) do
     {pool, query_id} = target(opts)
 
-    output_stream(:stream_io, sql, query_id, pool, opts, fn channel, config ->
-      messages =
-        Huginn.Clickhouse.Stream.input_stream(sql, input, query_opts(opts, config, query_id))
+    output_stream(:stream_io, sql, query_id, pool, fn config, metadata ->
+      with {:ok, transport} <- open_call(config, "ExecuteQueryWithStreamIO", opts, metadata) do
+        messages =
+          Huginn.Clickhouse.Stream.input_stream(sql, input, query_opts(opts, config, query_id))
 
-      open_io(channel, messages, stream_timeout(opts))
+        {:ok, %{transport: transport, input: suspend(messages), pending: nil}}
+      end
     end)
   end
 
@@ -585,125 +599,9 @@ defmodule Huginn.Clickhouse.Client do
     :exit, reason -> {:error, exit_error(reason)}
   end
 
-  # Client-streaming `ExecuteQueryWithStreamInput`: open the stream, push every
-  # message, half-close, then read the single Result.
-  defp stream_insert(channel, messages, timeout) do
-    grpc_opts = [timeout: timeout]
-
-    with {:ok, grpc_stream} <-
-           open_grpc_stream(fn -> Stub.execute_query_with_stream_input(channel, grpc_opts) end) do
-      guard = start_guard(grpc_stream)
-
-      try do
-        with {:ok, grpc_stream} <- send_input(grpc_stream, messages) do
-          grpc_stream
-          |> GRPC.Stub.recv(grpc_opts)
-          |> from_reply()
-        end
-      after
-        release(guard)
-      end
-    end
-  end
-
-  # Bidirectional `ExecuteQueryWithStreamIO`: open the stream, push every
-  # message, half-close, then hand back the lazy reply stream. Returns the
-  # state `output_stream/6` pulls from.
-  defp open_io(channel, messages, timeout) do
-    grpc_opts = [timeout: timeout]
-
-    with {:ok, grpc_stream} <-
-           open_grpc_stream(fn -> Stub.execute_query_with_stream_io(channel, grpc_opts) end) do
-      guard = start_guard(grpc_stream)
-
-      try do
-        with {:ok, grpc_stream} <- send_input(grpc_stream, messages),
-             {:ok, replies} <- recv_stream(grpc_stream, grpc_opts) do
-          {:ok, %{grpc: grpc_stream, guard: guard, next: suspend(replies)}}
-        end
-      catch
-        kind, reason ->
-          release(guard)
-          :erlang.raise(kind, reason, __STACKTRACE__)
-      else
-        {:ok, _conn} = ok ->
-          ok
-
-        {:error, _} = error ->
-          release(guard)
-          error
-      end
-    end
-  end
-
-  defp open_grpc_stream(open) do
-    case open.() do
-      %GRPC.Client.Stream{} = grpc_stream -> {:ok, grpc_stream}
-      {:error, reason} -> {:error, Huginn.Error.wrap(reason)}
-    end
-  catch
-    :exit, reason -> {:error, exit_error(reason)}
-  end
-
-  # A failed recv has consumed the stream's terminal message, so the RPC is
-  # over and there is nothing to cancel.
-  defp recv_stream(grpc_stream, grpc_opts) do
-    case GRPC.Stub.recv(grpc_stream, grpc_opts) do
-      {:ok, replies} -> {:ok, replies}
-      {:ok, replies, _headers} -> {:ok, replies}
-      {:error, reason} -> {:error, Huginn.Error.wrap(reason)}
-    end
-  end
-
   defp from_reply({:ok, grpc_result}), do: Result.from_grpc(grpc_result)
   defp from_reply({:ok, grpc_result, _headers}), do: Result.from_grpc(grpc_result)
   defp from_reply({:error, reason}), do: {:error, Huginn.Error.wrap(reason)}
-
-  # Pushes every QueryInfo onto a request stream and half-closes it.
-  #
-  # If the connection fails mid-send, the stream is cancelled and a
-  # `:connection` error is returned. If enumerating the caller's `messages`
-  # raises, the stream is cancelled (so the server does not wait for input
-  # forever) and the exception propagates. Our own send failures are told apart
-  # from the caller's by a tagged throw.
-  defp send_input(grpc_stream, messages) do
-    {:ok, push_messages(grpc_stream, messages)}
-  catch
-    :throw, {__MODULE__, :send_failed, reason} ->
-      cancel_quietly(grpc_stream)
-      {:error, exit_error(reason)}
-
-    kind, reason ->
-      cancel_quietly(grpc_stream)
-      :erlang.raise(kind, reason, __STACKTRACE__)
-  end
-
-  # One message is buffered so we always know which is last: every non-final
-  # message is sent with `next_query_info: true` (ClickHouse keeps reading), and
-  # the final one with `next_query_info: false` plus an END_STREAM frame.
-  defp push_messages(grpc_stream, messages) do
-    case Enum.reduce(messages, {grpc_stream, :none}, &push_pending/2) do
-      {grpc_stream, :none} -> guard_send(fn -> GRPC.Stub.end_stream(grpc_stream) end)
-      {grpc_stream, last} -> send_message(grpc_stream, last, false, end_stream: true)
-    end
-  end
-
-  defp push_pending(message, {grpc_stream, :none}), do: {grpc_stream, message}
-
-  defp push_pending(message, {grpc_stream, pending}) do
-    {send_message(grpc_stream, pending, true, []), message}
-  end
-
-  defp send_message(grpc_stream, message, next_query_info, opts) do
-    message = %{message | next_query_info: next_query_info}
-    guard_send(fn -> GRPC.Stub.send_request(grpc_stream, message, opts) end)
-  end
-
-  defp guard_send(fun) do
-    fun.()
-  catch
-    :exit, reason -> throw({__MODULE__, :send_failed, reason})
-  end
 
   # The adapter talks to the pool's connection process with `GenServer.call`,
   # whose exit reason embeds the call arguments, i.e. the encoded request with
@@ -729,64 +627,152 @@ defmodule Huginn.Clickhouse.Client do
   defp exit_cause({cause, {GenServer, :call, _args}}), do: exit_cause(cause)
   defp exit_cause(cause), do: cause
 
-  # Resets the HTTP/2 stream. ClickHouse then fails the query at its next send
-  # or input read. Must only be called on a stream whose terminal message has
-  # not been read: once the adapter's per-stream response process has
-  # delivered it, it stops itself, and cancelling it again races with its exit.
-  defp cancel_quietly(grpc_stream) do
-    GRPC.Stub.cancel(grpc_stream)
+  # =============================================================================
+  # Streaming calls (insert_stream/3, stream_query/2, stream_io/3)
+  # =============================================================================
+
+  # Streaming calls run over a dedicated, flow-controlled connection, see
+  # `Huginn.Clickhouse.Transport`. Opening one sends only the request headers,
+  # so it is always safe to retry, unlike what follows.
+  defp open_call(config, method, opts, metadata) do
+    Retry.with_retry(
+      fn -> Transport.open(config, method, stream_timeout(opts)) end,
+      opts,
+      metadata
+    )
+  end
+
+  # Client-streaming `ExecuteQueryWithStreamInput`: send every message,
+  # half-close, then read the single Result.
+  defp run_insert(transport, messages) do
+    transport =
+      transport
+      |> send_all(messages)
+      |> Transport.finish_input()
+      |> drain()
+      |> await_end()
+
+    {results, transport} = Transport.take(transport)
+    Transport.close(transport)
+    insert_reply(List.last(results), Transport.status(transport))
+  end
+
+  # A ClickHouse exception arrives as a Result, which is more specific than the
+  # gRPC status that may follow it.
+  defp insert_reply(nil, :done) do
+    {:error,
+     %Huginn.Error{
+       reason: :unexpected_reply,
+       message: "the server ended the insert without a Result",
+       details: nil
+     }}
+  end
+
+  defp insert_reply(nil, {:error, error}), do: {:error, error}
+
+  defp insert_reply(grpc_result, status) do
+    case {Result.from_grpc(grpc_result), status} do
+      {{:error, _} = error, _status} -> error
+      {{:ok, _} = ok, :done} -> ok
+      {{:ok, _}, {:error, error}} -> {:error, error}
+    end
+  end
+
+  # Sends every message, one at a time: the next one is only pulled from the
+  # source once the previous one has left (see `drain/1`), so memory holds at
+  # most one message whatever the speed of the source. One message is held
+  # back so we know which is last: every non-final one is sent with
+  # `next_query_info: true` (ClickHouse keeps reading), the last with `false`.
+  defp send_all(transport, messages), do: send_loop(transport, suspend(messages), nil)
+
+  defp send_loop(transport, next, pending) do
+    case pull_input(next, transport) do
+      {:ok, message, next} ->
+        transport = if pending, do: send_message(transport, pending, true), else: transport
+
+        if Transport.status(transport) == :open do
+          send_loop(transport, next, message)
+        else
+          # The server ended the call (it failed it): stop reading the source.
+          halt_input(next)
+          transport
+        end
+
+      :done ->
+        if pending, do: send_message(transport, pending, false), else: transport
+    end
+  end
+
+  # If enumerating the caller's source raises, the call is reset (so nothing is
+  # committed and the server does not wait for input forever) and the exception
+  # propagates.
+  defp pull_input(next, transport) do
+    case next.({:cont, nil}) do
+      {:suspended, message, next} -> {:ok, message, next}
+      {done, _acc} when done in [:done, :halted] -> :done
+    end
+  catch
+    kind, reason ->
+      stacktrace = __STACKTRACE__
+      Transport.close(transport)
+      :erlang.raise(kind, reason, stacktrace)
+  end
+
+  defp halt_input(nil), do: :ok
+
+  defp halt_input(next) do
+    next.({:halt, nil})
     :ok
   catch
-    # The connection is gone, and the stream with it.
-    :exit, _reason -> :ok
+    # Best effort: the call is over either way.
+    _kind, _reason -> :ok
   end
 
-  # The gun adapter keeps a stream alive in the shared connection process, not
-  # in the caller, so nothing cancels it if the caller is killed mid-stream
-  # (`Stream.resource/3` cleanup and `after` blocks do not run on a kill). This
-  # monitor process cancels the stream if the caller dies first. It is
-  # unlinked so the caller's death does not take it down too, and it holds no
-  # data and sends nothing to the caller.
-  defp start_guard(grpc_stream) do
-    caller = self()
-
-    spawn(fn ->
-      ref = Process.monitor(caller)
-
-      receive do
-        {:DOWN, ^ref, :process, _pid, _reason} -> cancel_quietly(grpc_stream)
-        :release -> :ok
-      end
-    end)
+  defp send_message(transport, message, next_query_info) do
+    transport
+    |> Transport.put_message(%{message | next_query_info: next_query_info})
+    |> drain()
   end
 
-  defp release(guard), do: send(guard, :release)
+  # Blocks until everything queued has been sent, waiting for the server to
+  # open its flow-control window as it consumes the data.
+  defp drain(transport) do
+    transport = Transport.flush(transport)
+
+    if Transport.sending?(transport),
+      do: transport |> Transport.await() |> drain(),
+      else: transport
+  end
+
+  defp await_end(transport) do
+    if Transport.status(transport) == :open,
+      do: transport |> Transport.await() |> await_end(),
+      else: transport
+  end
 
   # =============================================================================
   # Lazy output streams (stream_query/2, stream_io/3)
   # =============================================================================
 
-  # `open` receives the channel and pool config and returns
-  # `{:ok, %{grpc: stream, guard: pid, next: continuation}}` or an error. It
-  # runs when enumeration starts. The returned stream yields one element per
-  # Result, ends after the first error, and cancels the RPC unless it was read
-  # to the end.
-  defp output_stream(method, sql, query_id, pool, opts, open) do
+  # `open` receives the pool config and the span metadata and returns
+  # `{:ok, %{transport: t, input: continuation | nil, pending: message | nil}}`
+  # or an error. It runs when enumeration starts, in the enumerating process,
+  # which therefore owns the connection. The returned stream yields one element
+  # per Result, ends after the first error, and cancels the call unless it was
+  # read to the end.
+  defp output_stream(method, sql, query_id, pool, open) do
     Stream.resource(
-      fn -> start_output(method, sql, query_id, pool, opts, open) end,
+      fn -> start_output(method, sql, query_id, pool, open) end,
       &next_output/1,
       &finish_output/1
     )
   end
 
-  defp start_output(method, sql, query_id, pool, opts, open) do
+  defp start_output(method, sql, query_id, pool, open) do
     span = start_span(method, sql, query_id, pool)
 
     try do
-      with {:ok, config} <- Config.fetch(pool),
-           {:ok, channel} <- checkout_with_retry(pool, opts, span.metadata) do
-        open.(channel, config)
-      end
+      with {:ok, config} <- Config.fetch(pool), do: open.(config, span.metadata)
     catch
       kind, reason ->
         stacktrace = __STACKTRACE__
@@ -821,45 +807,93 @@ defmodule Huginn.Clickhouse.Client do
 
   defp next_output(state), do: {:halt, state}
 
+  # Yields what has been received; otherwise advances the call by one step
+  # (send queued data, feed one input message, or read once) and yields
+  # nothing, which `Stream.resource/3` turns into another call. Only reading
+  # once per step is what lets a slow consumer slow the server down.
   defp pull_output(%{conn: conn} = state) do
-    case conn.next.({:cont, nil}) do
-      {:suspended, reply, next} ->
-        handle_reply(reply, %{state | conn: %{conn | next: next}})
+    {results, transport} = Transport.take(conn.transport)
+    state = %{state | conn: %{conn | transport: transport}}
+
+    case {results, Transport.status(transport)} do
+      {[_ | _], _status} -> handle_results(results, state)
+      {[], :open} -> {[], %{state | conn: advance(state.conn)}}
+      {[], :done} -> {:halt, end_conn(state, :done)}
+      {[], {:error, error}} -> {[{:error, error}], end_conn(state, {:error, error})}
+    end
+  end
+
+  defp advance(%{transport: transport} = conn) do
+    cond do
+      Transport.sending?(transport) ->
+        transport = Transport.flush(transport)
+
+        transport =
+          if Transport.sending?(transport), do: Transport.await(transport), else: transport
+
+        %{conn | transport: transport}
+
+      conn.input ->
+        feed_input(conn)
+
+      true ->
+        %{conn | transport: Transport.await(transport)}
+    end
+  end
+
+  # Pulls one input message (`stream_io/3`). The previous one is sent now that
+  # we know it is not the last; at the end, the held-back one goes out as the
+  # last and the request is half-closed. A raising source propagates to
+  # `next_output/1`, which resets the call.
+  defp feed_input(%{input: next, pending: pending, transport: transport} = conn) do
+    case next.({:cont, nil}) do
+      {:suspended, message, next} ->
+        transport =
+          if pending, do: put_input(transport, pending, true), else: transport
+
+        %{conn | transport: transport, input: next, pending: message}
 
       {done, _acc} when done in [:done, :halted] ->
-        {:halt, %{state | conn: terminate_conn(conn), status: :done}}
+        transport = if pending, do: put_input(transport, pending, false), else: transport
+        %{conn | transport: Transport.finish_input(transport), input: nil, pending: nil}
     end
   end
 
-  defp handle_reply({:ok, grpc_result}, state) do
-    case Result.from_grpc(grpc_result, format: state.format, columns: state.columns) do
-      # ClickHouse sets `output_format` and `output_columns` only on the first
-      # Result of a stream, so later chunks are decoded with the ones carried
-      # over from it.
-      {:ok, result} ->
-        state = %{
-          state
-          | format: result.output_format,
-            columns: result.columns,
-            stats: result.stats || state.stats
-        }
-
-        {[{:ok, result}], state}
-
-      # A ClickHouse exception or undecodable chunk. The RPC may still be open;
-      # `finish_output/1` cancels it.
-      {:error, error} ->
-        {[{:error, error}], %{state | status: {:error, error}}}
-    end
+  defp put_input(transport, message, next_query_info) do
+    transport
+    |> Transport.put_message(%{message | next_query_info: next_query_info})
+    |> Transport.flush()
   end
 
-  # Trailers only appear as elements with `:return_headers`, which we never set.
-  defp handle_reply({:trailers, _trailers}, state), do: {[], state}
+  defp handle_results(results, state) do
+    {elements, state} =
+      Enum.reduce_while(results, {[], state}, fn grpc_result, {acc, state} ->
+        case Result.from_grpc(grpc_result, format: state.format, columns: state.columns) do
+          # ClickHouse sets `output_format` and `output_columns` only on the
+          # first Result of a stream, so later chunks are decoded with the ones
+          # carried over from it.
+          {:ok, result} ->
+            state = %{
+              state
+              | format: result.output_format,
+                columns: result.columns,
+                stats: result.stats || state.stats
+            }
 
-  # The adapter ends its stream after an error, so the RPC is over.
-  defp handle_reply({:error, reason}, state) do
-    error = Huginn.Error.wrap(reason)
-    {[{:error, error}], %{state | conn: terminate_conn(state.conn), status: {:error, error}}}
+            {:cont, {[{:ok, result} | acc], state}}
+
+          # A ClickHouse exception or an undecodable chunk ends the stream.
+          {:error, error} ->
+            {:halt, {[{:error, error} | acc], end_conn(state, {:error, error})}}
+        end
+      end)
+
+    {Enum.reverse(elements), state}
+  end
+
+  defp end_conn(state, status) do
+    close_conn(state.conn)
+    %{state | conn: nil, status: status}
   end
 
   # Runs on completion, early halt and exceptions alike.
@@ -877,18 +911,13 @@ defmodule Huginn.Clickhouse.Client do
   defp stop_metadata(%{status: {_, error}}), do: %{error: error}
   defp stop_metadata(%{status: :running}), do: %{halted: true}
 
-  # The stream reached its end on its own: just release the guard.
-  defp terminate_conn(%{guard: guard}) do
-    release(guard)
-    nil
-  end
-
-  # The stream was abandoned before its end: cancel it, then release the guard.
+  # Resets the call if it is still running (ClickHouse then stops the query)
+  # and closes its connection.
   defp close_conn(nil), do: :ok
 
-  defp close_conn(%{grpc: grpc_stream, guard: guard}) do
-    cancel_quietly(grpc_stream)
-    release(guard)
+  defp close_conn(%{transport: transport, input: input}) do
+    halt_input(input)
+    Transport.close(transport)
   end
 
   # Pulls a lazy enumerable one element at a time.

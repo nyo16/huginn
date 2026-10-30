@@ -5,7 +5,9 @@ ClickHouse client for Elixir using gRPC with connection pooling.
 ## Features
 
 - gRPC protocol for efficient binary communication
-- Connection pooling with health monitoring
+- Connection pooling with health monitoring for requests; streaming calls get
+  their own flow-controlled connection, so large reads and writes stay
+  bounded in memory
 - Support for all 4 ClickHouse gRPC methods:
   - `ExecuteQuery` - simple request/response
   - `ExecuteQueryWithStreamInput` - streaming inserts
@@ -233,14 +235,17 @@ Huginn.stream_maps("SELECT id, name FROM users")
 |> Enum.find(fn %{"name" => name} -> name == "neo" end)
 ```
 
-> #### Memory {: .warning}
+> #### Memory {: .tip}
 >
-> grpc-elixir's gun adapter refills the HTTP/2 receive window on its own, so a
-> consumer slower than the server still buffers the unread part of the result
-> in memory. Bound large reads with `LIMIT` or the `max_result_bytes` setting.
-> The same adapter sends input messages without waiting for the send window,
-> so `insert_stream/3` from a very fast source buffers in the connection
-> process.
+> Streaming calls are flow-controlled in both directions. Each one runs on
+> its own HTTP/2 connection to the pool's server (same TLS settings and
+> credentials), which is only read as fast as you consume the stream: a slow
+> consumer makes ClickHouse wait instead of buffering the result in memory,
+> and stalling one stream stalls no other query. On the way in, the next
+> message (about `:chunk_size` bytes) is only pulled from your source once
+> the previous one fits in the server's flow-control window. ClickHouse sends
+> about one block per message, so lower the `max_block_size` setting if
+> single blocks of your rows are very large.
 
 ### Streamed Input and Output (ExecuteQueryWithStreamIO)
 

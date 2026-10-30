@@ -177,6 +177,17 @@ defmodule Huginn.Clickhouse.Config do
     ]
   end
 
+  @doc false
+  # The scheme and TLS options for connections Huginn opens itself (streaming
+  # calls, see `Huginn.Clickhouse.Transport`). Same TLS policy as the pool.
+  @spec endpoint(t()) :: {:http | :https, String.t(), pos_integer(), keyword()}
+  def endpoint(%__MODULE__{} = config) do
+    case ssl_opts(config.ssl) do
+      nil -> {:http, config.host, config.port, []}
+      opts -> {:https, config.host, config.port, opts}
+    end
+  end
+
   # `ssl: true` must mean "verify the peer", not "TLS with no options". Passing
   # `ssl: []` would defeat the pool's own secure default, because it resolves
   # the endpoint as `opts[:ssl] || default_production_ssl()` and an empty list
