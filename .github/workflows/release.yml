@@ -1,44 +1,60 @@
 name: Release
 
-# Publishes to Hex when a version tag is pushed, e.g. `git tag v0.4.0 && git push --tags`.
-# Requires a `HEX_API_KEY` repository secret (generate with `mix hex.user key generate`).
+# Publishes to Hex when a version tag is pushed, e.g. `git tag v0.6.0 && git push --tags`.
+# The tag must match `@version` in mix.exs; bump mix.exs (and CHANGELOG.md) before tagging.
+# Requires a `HEX_API_KEY` secret on the `hex` environment (generate with `mix hex.user key generate`).
 on:
   push:
     tags: ["v*"]
+
+permissions:
+  contents: read
 
 env:
   ELIXIR_VERSION: "1.18"
   OTP_VERSION: "27.0"
 
 jobs:
+  checks:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
   publish:
     name: Publish to Hex
     runs-on: ubuntu-22.04
-    permissions:
-      contents: read
+    needs: [checks]
+    environment: hex
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: erlef/setup-beam@v1
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: ${{ env.OTP_VERSION }}
           elixir-version: ${{ env.ELIXIR_VERSION }}
-
-      - name: Set version from tag
-        env:
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          TAG_VERSION="${REF_NAME#v}"
-          sed -i "s/@version \".*\"/@version \"${TAG_VERSION}\"/" mix.exs
-          grep '@version' mix.exs
 
       - run: mix deps.get
         env:
           MIX_ENV: dev
 
-      - run: mix compile
+      - run: mix compile --warnings-as-errors
         env:
           MIX_ENV: dev
+
+      - name: Verify tag matches mix.exs version
+        env:
+          MIX_ENV: dev
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ! [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Tag '$REF_NAME' is not a valid version tag (expected vMAJOR.MINOR.PATCH[-PRE])"
+            exit 1
+          fi
+          TAG_VERSION="${REF_NAME#v}"
+          PROJECT_VERSION="$(mix run --no-start -e 'IO.puts(Mix.Project.config()[:version])')"
+          if [ "$TAG_VERSION" != "$PROJECT_VERSION" ]; then
+            echo "::error::Tag version $TAG_VERSION does not match mix.exs @version $PROJECT_VERSION"
+            exit 1
+          fi
 
       - name: Publish to Hex
         env:

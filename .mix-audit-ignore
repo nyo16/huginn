@@ -1,0 +1,7 @@
+# Advisory IDs ignored by `mix deps.audit --ignore-file .mix-audit-ignore`.
+# One ID per line; lines starting with `#` are comments.
+#
+# GHSA-w4f7-4cxr-rv3c: false positive for gun. The advisory covers both cowboy
+# (< 2.16.0) and gun (< 2.4.0), but mix_audit applies the cowboy range
+# ("first patched 2.16.0") to gun too. gun 2.4.1 is already patched.
+GHSA-w4f7-4cxr-rv3c

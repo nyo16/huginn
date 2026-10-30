@@ -18,7 +18,6 @@ defmodule Huginn.Clickhouse.Query do
           query_id: String.t(),
           session_id: String.t(),
           session_timeout: non_neg_integer(),
-          compression: String.t(),
           send_output_columns: boolean()
         ]
 
@@ -36,7 +35,6 @@ defmodule Huginn.Clickhouse.Query do
     * `:query_id` - Custom query ID for tracking
     * `:session_id` - Session ID for stateful queries
     * `:session_timeout` - Session timeout in seconds
-    * `:compression` - Output compression type
     * `:send_output_columns` - Include column metadata in response
 
   """
@@ -53,7 +51,6 @@ defmodule Huginn.Clickhouse.Query do
       settings: Keyword.get(opts, :settings, %{}),
       session_id: Keyword.get(opts, :session_id, ""),
       session_timeout: Keyword.get(opts, :session_timeout, 0),
-      output_compression_type: Keyword.get(opts, :compression, ""),
       send_output_columns: Keyword.get(opts, :send_output_columns, true)
     }
   end
@@ -61,12 +58,16 @@ defmodule Huginn.Clickhouse.Query do
   @doc """
   Builds a QueryInfo struct for an INSERT query with input data.
 
+  The input data format is taken from the SQL `FORMAT` clause (e.g.
+  `INSERT INTO t FORMAT TabSeparated`), not from an option.
+
   ## Options
 
-  Same as `build/2` plus:
+  Same as `build/2` (except `:format` and `:send_output_columns`, which do not
+  apply to inserts) plus:
 
-    * `:input_format` - Format of input data (default: "TabSeparated")
-    * `:input_compression` - Compression type of input data
+    * `:input_compression` - Compression type of `data` (e.g. `"gzip"`); the
+      server decompresses it before parsing
 
   """
   @spec build_insert(String.t(), binary(), keyword()) :: struct()
@@ -79,7 +80,6 @@ defmodule Huginn.Clickhouse.Query do
       password: Keyword.get(opts, :password, ""),
       jwt: Keyword.get(opts, :jwt, ""),
       input_data: data,
-      output_format: Keyword.get(opts, :format, "TabSeparated"),
       input_compression_type: Keyword.get(opts, :input_compression, ""),
       settings: Keyword.get(opts, :settings, %{}),
       session_id: Keyword.get(opts, :session_id, ""),
@@ -135,15 +135,26 @@ defmodule Huginn.Clickhouse.Query do
   end
 
   @doc """
-  Merges authentication options into query options.
+  Applies a pool's config to per-call query options.
+
+  The config's `:database` and authentication credentials become defaults;
+  options given in `opts` always win.
+
+  ## Examples
+
+      iex> config = Huginn.Clickhouse.Config.new(host: "localhost", database: "analytics")
+      iex> Huginn.Clickhouse.Query.with_config([format: "JSON"], config)
+      [database: "analytics", format: "JSON"]
+
   """
-  @spec with_auth(keyword(), Config.t()) :: keyword()
-  def with_auth(opts, config) do
-    auth_opts = Config.auth_opts(config)
-    Keyword.merge(auth_opts, opts)
+  @spec with_config(keyword(), Config.t()) :: keyword()
+  def with_config(opts, %Config{} = config) do
+    Keyword.merge([database: config.database] ++ Config.auth_opts(config), opts)
   end
 
-  defp generate_query_id do
+  @doc false
+  @spec generate_query_id() :: String.t()
+  def generate_query_id do
     :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
   end
 end

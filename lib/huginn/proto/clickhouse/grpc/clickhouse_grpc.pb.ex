@@ -4,7 +4,7 @@ defmodule Clickhouse.Grpc.LogsLevel do
   use Protobuf,
     enum: true,
     full_name: "clickhouse.grpc.LogsLevel",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :LOG_NONE, 0
@@ -25,7 +25,7 @@ defmodule Clickhouse.Grpc.ObsoleteTransportCompression.CompressionAlgorithm do
   use Protobuf,
     enum: true,
     full_name: "clickhouse.grpc.ObsoleteTransportCompression.CompressionAlgorithm",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :NO_COMPRESSION, 0
@@ -40,7 +40,7 @@ defmodule Clickhouse.Grpc.ObsoleteTransportCompression.CompressionLevel do
   use Protobuf,
     enum: true,
     full_name: "clickhouse.grpc.ObsoleteTransportCompression.CompressionLevel",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :COMPRESSION_NONE, 0
@@ -54,7 +54,7 @@ defmodule Clickhouse.Grpc.NameAndType do
 
   use Protobuf,
     full_name: "clickhouse.grpc.NameAndType",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :name, 1, type: :string
@@ -67,7 +67,7 @@ defmodule Clickhouse.Grpc.ExternalTable.SettingsEntry do
   use Protobuf,
     full_name: "clickhouse.grpc.ExternalTable.SettingsEntry",
     map: true,
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :key, 1, type: :string
@@ -79,7 +79,7 @@ defmodule Clickhouse.Grpc.ExternalTable do
 
   use Protobuf,
     full_name: "clickhouse.grpc.ExternalTable",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :name, 1, type: :string
@@ -95,7 +95,7 @@ defmodule Clickhouse.Grpc.ObsoleteTransportCompression do
 
   use Protobuf,
     full_name: "clickhouse.grpc.ObsoleteTransportCompression",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :algorithm, 1,
@@ -111,7 +111,7 @@ defmodule Clickhouse.Grpc.QueryInfo.SettingsEntry do
   use Protobuf,
     full_name: "clickhouse.grpc.QueryInfo.SettingsEntry",
     map: true,
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :key, 1, type: :string
@@ -123,7 +123,7 @@ defmodule Clickhouse.Grpc.QueryInfo do
 
   use Protobuf,
     full_name: "clickhouse.grpc.QueryInfo",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :query, 1, type: :string
@@ -167,7 +167,7 @@ defmodule Clickhouse.Grpc.LogEntry do
 
   use Protobuf,
     full_name: "clickhouse.grpc.LogEntry",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :time, 1, type: :uint32
@@ -184,7 +184,7 @@ defmodule Clickhouse.Grpc.Progress do
 
   use Protobuf,
     full_name: "clickhouse.grpc.Progress",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :read_rows, 1, type: :uint64, json_name: "readRows"
@@ -199,7 +199,7 @@ defmodule Clickhouse.Grpc.Stats do
 
   use Protobuf,
     full_name: "clickhouse.grpc.Stats",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :rows, 1, type: :uint64
@@ -216,7 +216,7 @@ defmodule Clickhouse.Grpc.Exception do
 
   use Protobuf,
     full_name: "clickhouse.grpc.Exception",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :code, 1, type: :int32
@@ -230,7 +230,7 @@ defmodule Clickhouse.Grpc.Result do
 
   use Protobuf,
     full_name: "clickhouse.grpc.Result",
-    protoc_gen_elixir_version: "0.17.0",
+    protoc_gen_elixir_version: "0.17.1",
     syntax: :proto3
 
   field :query_id, 9, type: :string, json_name: "queryId"
@@ -255,7 +255,7 @@ end
 defmodule Clickhouse.Grpc.ClickHouse.Service do
   @moduledoc false
 
-  use GRPC.Service, name: "clickhouse.grpc.ClickHouse", protoc_gen_elixir_version: "0.17.0"
+  use GRPC.Service, name: "clickhouse.grpc.ClickHouse", protoc_gen_elixir_version: "0.17.1"
 
   rpc :ExecuteQuery, Clickhouse.Grpc.QueryInfo, Clickhouse.Grpc.Result
 

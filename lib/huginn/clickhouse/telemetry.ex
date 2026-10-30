@@ -2,18 +2,36 @@ defmodule Huginn.Clickhouse.Telemetry do
   @moduledoc """
   Telemetry events emitted by Huginn, and an optional default logger.
 
-  Each request issued through `Huginn.Clickhouse.Client` (`query/2`, `insert/3`,
-  `insert_stream/3`) is wrapped in a [`:telemetry`](https://hexdocs.pm/telemetry)
-  span:
+  Every request issued through `Huginn.Clickhouse.Client` is wrapped in a
+  [`:telemetry`](https://hexdocs.pm/telemetry) span:
 
   | Event | Measurements | Metadata |
   | ----- | ------------ | -------- |
-  | `[:huginn, :query, :start]` | `:system_time`, `:monotonic_time` | `:method`, `:sql`, `:query_id`, `:pool` |
-  | `[:huginn, :query, :stop]` | `:duration`, `:monotonic_time` | above + `:rows`, `:stats` (or `:error`) |
-  | `[:huginn, :query, :exception]` | `:duration`, `:monotonic_time` | above + `:kind`, `:reason`, `:stacktrace` |
+  | `[:huginn, :query, :start]` | `:system_time`, `:monotonic_time` | `:method`, `:sql`, `:query_id`, `:pool`, `:telemetry_span_context` |
+  | `[:huginn, :query, :stop]` | `:duration`, `:monotonic_time` | start metadata + `:stats` and `:rows`, or `:error`, or `:halted` |
+  | `[:huginn, :query, :exception]` | `:duration`, `:monotonic_time` | start metadata + `:kind`, `:reason`, `:stacktrace` |
+  | `[:huginn, :query, :retry]` | `:attempt`, `:delay` | `:method`, `:sql`, `:query_id`, `:pool`, `:error` |
 
-  `:method` is one of `:query`, `:insert`, `:insert_stream`. Durations are in
+  `:method` is one of `:query`, `:insert`, `:insert_stream`, `:stream_query`,
+  `:stream_io`. `:query_id` is the ID the query runs under on the server. It
+  is generated up front unless you pass `:query_id`. Durations are in
   `:native` time units (use `System.convert_time_unit/3`).
+
+  `:stop` metadata depends on how the request ended:
+
+    * success - `:stats` is the server's final statistics (or `nil`) and
+      `:rows` is `stats.rows`, the number of result rows (only when the
+      server sent statistics)
+    * failure - `:error` is the `Huginn.Error`
+    * a stream the consumer stopped early - `halted: true`
+
+  `stream_query/2` and `stream_io/3` are lazy: their `:start` is emitted when
+  enumeration begins, and `:stop` (or `:exception`) when it ends, so
+  `:duration` covers the whole enumeration.
+
+  `[:huginn, :query, :retry]` fires before each retry of a `:connection`
+  failure. `:attempt` is the attempt that just failed (1-based), `:delay` is
+  the backoff in milliseconds.
 
   ## Default logger
 
@@ -59,9 +77,14 @@ defmodule Huginn.Clickhouse.Telemetry do
     ms = System.convert_time_unit(duration, :native, :millisecond)
 
     case metadata do
-      %{error: reason} ->
+      %{error: error} ->
         Logger.error(fn ->
-          "Huginn #{metadata.method} failed in #{ms}ms: #{inspect(reason)} — #{trim(metadata.sql)}"
+          "Huginn #{metadata.method} failed in #{ms}ms: #{format_error(error)} — #{trim(metadata.sql)}"
+        end)
+
+      %{halted: true} ->
+        Logger.log(level, fn ->
+          "Huginn #{metadata.method} stopped early after #{ms}ms — #{trim(metadata.sql)}"
         end)
 
       _ ->
@@ -79,6 +102,9 @@ defmodule Huginn.Clickhouse.Telemetry do
         "#{Exception.format(metadata.kind, metadata.reason)} — #{trim(metadata.sql)}"
     end)
   end
+
+  defp format_error(%Huginn.Error{} = error), do: Exception.message(error)
+  defp format_error(error), do: inspect(error)
 
   defp rows(%{rows: count}) when is_integer(count), do: "(#{count} rows) "
   defp rows(_metadata), do: ""

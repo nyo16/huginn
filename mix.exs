@@ -8,7 +8,7 @@ defmodule Huginn.MixProject do
     [
       app: :huginn,
       version: @version,
-      elixir: "~> 1.14",
+      elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description: description(),
@@ -17,7 +17,9 @@ defmodule Huginn.MixProject do
       name: "Huginn",
       source_url: @source_url,
       homepage_url: @source_url,
-      dialyzer: [plt_file: {:no_warn, "priv/plts/project.plt"}]
+      dialyzer: [plt_file: {:no_warn, "priv/plts/project.plt"}],
+      # Generated protobuf/gRPC modules would otherwise dominate coverage numbers.
+      test_coverage: [ignore_modules: [~r/^Clickhouse\.Grpc\./]]
     ]
   end
 
@@ -30,13 +32,15 @@ defmodule Huginn.MixProject do
 
   defp deps do
     [
-      {:grpc_connection_pool, "~> 0.5.2"},
-      {:protobuf, "~> 0.17"},
+      {:grpc, "~> 1.0.5"},
+      {:grpc_connection_pool, "~> 0.5.3"},
+      {:protobuf, "~> 0.17.1"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 
