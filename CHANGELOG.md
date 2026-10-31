@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates.
 - Test coverage excludes the generated `Clickhouse.Grpc.*` modules.
 - New runtime dependency `:mint` `~> 1.11` for the streaming transport.
+- `mix hex.audit` acknowledges CVE-2026-43966 (cowlib, and gun through the GHSA
+  alias) via `hex: [ignore_advisories: ...]` in `mix.exs`. No cowlib release
+  fixes it, and the vulnerable structured-header encoder is not called by
+  huginn or any of its dependencies; the rationale is documented next to the
+  entry. The findings still print under "Ignored advisories".
 
 ### CI
 
