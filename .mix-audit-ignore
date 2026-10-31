@@ -1,0 +1,9 @@
+# Advisory IDs ignored by `mix deps.audit --ignore-file .mix-audit-ignore`.
+# One ID per line; lines starting with `#` are comments.
+#
+# GHSA-w4f7-4cxr-rv3c (CVE-2026-43966): no fixed cowlib release exists, the
+# GHSA's gun "patched 2.16.0" is a cowboy version (gun is unaffected from
+# 2.4.0), and the vulnerable cowlib encoder is unreachable from huginn. The
+# full rationale sits next to the matching `hex: [ignore_advisories: ...]`
+# entry in mix.exs, which covers `mix hex.audit`.
+GHSA-w4f7-4cxr-rv3c

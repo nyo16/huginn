@@ -5,17 +5,21 @@ ClickHouse client for Elixir using gRPC with connection pooling.
 ## Features
 
 - gRPC protocol for efficient binary communication
-- Connection pooling with health monitoring
+- Connection pooling with health monitoring for requests; streaming calls get
+  their own flow-controlled connection, so large reads and writes stay
+  bounded in memory
 - Support for all 4 ClickHouse gRPC methods:
   - `ExecuteQuery` - simple request/response
   - `ExecuteQueryWithStreamInput` - streaming inserts
-  - `ExecuteQueryWithStreamOutput` - streaming large results
-  - `ExecuteQueryWithStreamIO` - bidirectional streaming
+  - `ExecuteQueryWithStreamIO` - lazy, cancellable result streams and
+    streamed `INSERT ... SELECT FROM input(...)`
 - Both password and JWT authentication
 - Query cancellation support
-- Automatic result parsing
+- Automatic result parsing with exact ClickHouse TSV/CSV escaping (`NULL` ↔ `nil`)
+- Multiple pools with their own host, database and credentials
+- A single error type, `Huginn.Error`
 - Telemetry instrumentation and an opt-in default logger
-- Opt-in retries for transient transport failures
+- Opt-in retries for connection failures
 
 ## Installation
 
@@ -24,7 +28,7 @@ Add `huginn` to your list of dependencies in `mix.exs`:
 ```elixir
 def deps do
   [
-    {:huginn, "~> 0.3.0"}
+    {:huginn, "~> 0.6.0"}
   ]
 end
 ```
@@ -51,8 +55,31 @@ config :huginn, :clickhouse,
 | `:database` | `"default"` | Default database |
 | `:auth` | `nil` | `{:password, user, pass}` or `{:jwt, token}` |
 | `:pool_size` | `5` | Number of connections |
-| `:ssl` | `false` | `true` verifies the peer against the system CA store; a keyword list is passed to `:ssl` verbatim |
-| `:pool_name` | `:clickhouse_pool` | Pool name for multiple pools |
+| `:ssl` | `false` | `true` verifies the peer against the system CA store. A keyword list is passed to `:ssl` with `verify: :verify_peer`, the system CAs and hostname checking merged underneath (your keys win; opt out with an explicit `verify: :verify_none`) |
+| `:pool_name` | `:clickhouse_pool` | Name used to select the pool with `pool:` |
+
+`Huginn.Clickhouse.Config.new/1` raises `ArgumentError` for a missing `:host`
+or any invalid/unknown option; the message never includes credentials, and
+`inspect/1` on a config hides `:auth`.
+
+### Multiple Pools
+
+The pool configured under `:huginn, :clickhouse` is started by Huginn's own
+application. Start more pools — different hosts, databases or credentials — in
+your supervision tree and select them per call with `pool:`:
+
+```elixir
+children = [
+  {Huginn, host: "analytics.internal", database: "events", pool_name: :events,
+   auth: {:password, "reader", System.fetch_env!("EVENTS_PASSWORD")}}
+]
+
+:ok = Huginn.await_ready(:events, 5_000)
+Huginn.query("SELECT count() FROM page_views", pool: :events)
+```
+
+A call naming a pool that was never started returns
+`{:error, %Huginn.Error{reason: :not_configured}}`.
 
 ### Production Configuration
 
@@ -89,199 +116,167 @@ For a private CA or client certificates, pass `:ssl` options through directly:
 | gRPC Method | Function | Use Case |
 |-------------|----------|----------|
 | `ExecuteQuery` | `query/2`, `insert/3` | Simple queries, small inserts |
-| `ExecuteQueryWithStreamInput` | `insert_stream/3` | Large file imports |
-| `ExecuteQueryWithStreamOutput` | `stream_query/2` | Large result sets |
-| `ExecuteQueryWithStreamIO` | `stream_io/1` | Bidirectional streaming |
+| `ExecuteQueryWithStreamInput` | `insert_stream/3` | Large imports |
+| `ExecuteQueryWithStreamIO` | `stream_query/2`, `stream_rows/2`, `stream_maps/2` | Large result sets (input side closed immediately, so the stream can be cancelled) |
+| `ExecuteQueryWithStreamIO` | `stream_io/3` | `INSERT ... SELECT FROM input(...)` with streamed input |
+
+### Errors
+
+Every function returns `{:error, %Huginn.Error{}}` on failure; `query!/2`,
+`stream_rows/2` and `stream_maps/2` raise it. Branch on `:reason`
+(`:server`, `:connection`, `:timeout`, `:grpc`, `:decode`,
+`:unexpected_reply`, `:not_configured`); `:code` holds the ClickHouse error
+code for `:server` errors.
+
+```elixir
+case Huginn.query("SELEC 1") do
+  {:ok, result} -> result.rows
+  {:error, %Huginn.Error{reason: :server, code: 62} = e} -> Logger.warning(e.message)
+  {:error, %Huginn.Error{} = e} -> raise e
+end
+```
 
 ### Simple Queries (ExecuteQuery)
 
 ```elixir
-# Execute a query
-{:ok, result} = Huginn.query("SELECT * FROM system.tables LIMIT 10")
+{:ok, result} = Huginn.query("SELECT name, engine FROM system.tables LIMIT 10")
 
-# Get results as maps
+# Rows as maps keyed by column name
 maps = Huginn.Clickhouse.Result.to_maps(result)
 
-# Query with options
-{:ok, result} = Huginn.query(
-  "SELECT * FROM users WHERE status = 'active'",
-  database: "mydb",
-  format: "JSONEachRow",
-  timeout: 30_000
-)
+# With options
+{:ok, result} =
+  Huginn.query("SELECT * FROM users WHERE status = 'active'",
+    database: "mydb",
+    format: "JSONEachRow",
+    timeout: 30_000
+  )
 
 # Raising version
 result = Huginn.query!("SELECT 1")
 ```
 
-### Inserts (ExecuteQuery)
+TabSeparated and CSV values are decoded with ClickHouse's escaping rules, so
+values containing tabs, newlines or backslashes come back intact and `NULL` is
+`nil`. JSON formats keep JSON types.
+
+Interpolating values into SQL: escape them with
+`Huginn.Clickhouse.SQL.escape/1` and always place them inside single quotes:
 
 ```elixir
-# Simple insert with TabSeparated data
-data = "john\t25\njane\t30"
-{:ok, _} = Huginn.insert(
-  "INSERT INTO users (name, age) FORMAT TabSeparated",
-  data
-)
+alias Huginn.Clickhouse.SQL
+Huginn.query("SELECT * FROM users WHERE name = '#{SQL.escape(name)}'")
+```
 
-# JSONEachRow format
-data = ~s({"name":"john","age":25}\n{"name":"jane","age":30})
-{:ok, _} = Huginn.insert("INSERT INTO users FORMAT JSONEachRow", data)
+### Inserts (ExecuteQuery)
+
+`insert/3` takes the already-encoded payload; its format is the SQL `FORMAT`
+clause.
+
+```elixir
+{:ok, _} = Huginn.insert("INSERT INTO users (name, age) FORMAT TabSeparated", "john\t25\njane\t30")
+
+{:ok, _} =
+  Huginn.insert("INSERT INTO users FORMAT JSONEachRow",
+    ~s({"name":"john","age":25}\n{"name":"jane","age":30})
+  )
 ```
 
 ### Streaming Inserts (ExecuteQueryWithStreamInput)
 
+The data is the second argument. Elements may be pre-encoded binaries (sent
+verbatim) or rows, encoded according to `:format` (`"TabSeparated"` by
+default; `"CSV"`, `"JSONEachRow"` for maps, `"JSONCompactEachRow"` for lists).
+`:chunk_size` is the target size of each gRPC message in bytes (default 1 MiB).
+
 ```elixir
-# Stream from a file
-File.stream!("large_data.csv", [], 65_536)
-|> Huginn.insert_stream("INSERT INTO logs FORMAT CSV")
+# Stream a file; pre-encoded chunks are passed through untouched
+File.stream!("large_data.csv", 65_536)
+|> then(&Huginn.insert_stream("INSERT INTO logs FORMAT CSV", &1))
 
-# Stream with progress tracking using Agent
-{:ok, counter} = Agent.start_link(fn -> 0 end)
+# Structured rows, escaped for you; nil becomes NULL
+rows = [["neo", "1"], ["trinity", nil]]
+{:ok, _} = Huginn.insert_stream("INSERT INTO users (name, team) FORMAT TabSeparated", rows)
 
-large_data
-|> Stream.chunk_every(1000)
-|> Stream.map(fn chunk ->
-  Agent.update(counter, &(&1 + length(chunk)))
-  Enum.join(chunk, "\n")
-end)
-|> Huginn.insert_stream("INSERT INTO events FORMAT TabSeparated")
-
-IO.puts("Inserted #{Agent.get(counter, & &1)} rows")
-Agent.stop(counter)
+# Maps for JSONEachRow
+{:ok, _} =
+  Huginn.insert_stream("INSERT INTO users FORMAT JSONEachRow", [%{name: "neo", age: 30}],
+    format: "JSONEachRow"
+  )
 ```
 
-### Streaming Results (ExecuteQueryWithStreamOutput)
+Inserts are never re-sent once data reached the server (see [Retries](#retries)).
+If the source raises mid-stream, the insert is cancelled and nothing is
+committed.
+
+### Streaming Results
+
+`stream_query/2` is lazy and enumerated once. It yields `{:ok, result}` chunks;
+an error is always the last element. `stream_rows/2` and `stream_maps/2`
+flatten the chunks and raise `Huginn.Error` on failure, like `File.stream!/2`.
+Stopping early (`Enum.take/2`, `Enum.find/2`, an exception, the consumer
+process dying) cancels the query on the server. Streams have no timeout unless
+you pass `:timeout`.
 
 ```elixir
-# Basic streaming
 Huginn.stream_query("SELECT * FROM large_table")
 |> Enum.each(fn
-  {:ok, result} -> process_chunk(result)
-  {:error, error} -> Logger.error("Error: #{inspect(error)}")
+  {:ok, result} -> process_chunk(result.rows)
+  {:error, error} -> Logger.error(Exception.message(error))
 end)
 
-# Stream rows directly
+# Rows, in batches
 Huginn.stream_rows("SELECT * FROM events")
-|> Stream.take(1000)
+|> Stream.chunk_every(1_000)
+|> Enum.each(&process_batch/1)
+
+# Maps; stops (and cancels the query) after the first match
+Huginn.stream_maps("SELECT id, name FROM users")
+|> Enum.find(fn %{"name" => name} -> name == "neo" end)
+```
+
+> #### Memory {: .tip}
+>
+> Streaming calls are flow-controlled in both directions. Each one runs on
+> its own HTTP/2 connection to the pool's server (same TLS settings and
+> credentials), which is only read as fast as you consume the stream: a slow
+> consumer makes ClickHouse wait instead of buffering the result in memory,
+> and stalling one stream stalls no other query. On the way in, the next
+> message (about `:chunk_size` bytes) is only pulled from your source once
+> the previous one fits in the server's flow-control window. ClickHouse sends
+> about one block per message, so lower the `max_block_size` setting if
+> single blocks of your rows are very large.
+
+### Streamed Input and Output (ExecuteQueryWithStreamIO)
+
+`stream_io/3` runs one `INSERT ... SELECT FROM input(...)` statement: the input
+enumerable is encoded like `insert_stream/3`, and the returned lazy stream
+carries the server's results (progress, logs, stats). Pool credentials and
+database apply.
+
+```elixir
+Huginn.stream_io(
+  "INSERT INTO squares SELECT x, x * x FROM input('x UInt32') FORMAT TabSeparated",
+  Stream.map(1..1_000_000, &[&1])
+)
 |> Enum.to_list()
-
-# Stream as maps
-Huginn.stream_maps("SELECT name, age FROM users")
-|> Stream.filter(fn %{"age" => age} -> String.to_integer(age) > 18 end)
-|> Enum.to_list()
-```
-
-### Using Agent to Accumulate Results
-
-```elixir
-# Accumulate all rows with error counting
-{:ok, agent} = Agent.start_link(fn -> %{rows: [], errors: 0} end)
-
-Huginn.stream_query("SELECT * FROM metrics")
-|> Enum.each(fn
-  {:ok, result} ->
-    Agent.update(agent, fn state ->
-      %{state | rows: state.rows ++ result.rows}
-    end)
-  {:error, _} ->
-    Agent.update(agent, fn state ->
-      %{state | errors: state.errors + 1}
-    end)
-end)
-
-final_state = Agent.get(agent, & &1)
-IO.puts("Got #{length(final_state.rows)} rows, #{final_state.errors} errors")
-Agent.stop(agent)
-```
-
-### Custom Stream.resource Pattern
-
-```elixir
-defmodule MyApp.ClickHouseStream do
-  @moduledoc "Custom streaming with backpressure control"
-
-  def stream_with_backpressure(query, batch_size \\ 100) do
-    Stream.resource(
-      fn -> init_query(query) end,
-      fn state -> next_batch(state, batch_size) end,
-      fn _state -> :ok end
-    )
-  end
-
-  defp init_query(query) do
-    stream = Huginn.stream_rows(query)
-    %{stream: stream, buffer: [], done: false}
-  end
-
-  defp next_batch(%{done: true} = state, _batch_size) do
-    {:halt, state}
-  end
-
-  defp next_batch(%{stream: stream, buffer: buffer} = state, batch_size) do
-    {rows, rest} =
-      stream
-      |> Stream.take(batch_size - length(buffer))
-      |> Enum.to_list()
-      |> then(fn new_rows -> {buffer ++ new_rows, stream} end)
-
-    if length(rows) < batch_size do
-      {[rows], %{state | done: true}}
-    else
-      {[Enum.take(rows, batch_size)], %{state | buffer: Enum.drop(rows, batch_size)}}
-    end
-  end
-end
-
-# Usage
-MyApp.ClickHouseStream.stream_with_backpressure("SELECT * FROM events")
-|> Enum.each(fn batch ->
-  process_batch(batch)
-  Process.sleep(100)  # Rate limiting
-end)
-```
-
-### Bidirectional Streaming (ExecuteQueryWithStreamIO)
-
-```elixir
-# Interactive query session
-{output, send} = Huginn.stream_io()
-
-# Send queries
-send.(Huginn.Clickhouse.Query.build("SELECT 1"))
-send.(Huginn.Clickhouse.Query.build("SELECT 2"))
-
-# Process results
-Task.async(fn ->
-  Enum.each(output, fn
-    {:ok, result} -> IO.inspect(result.rows)
-    {:error, err} -> IO.puts("Error: #{inspect(err)}")
-  end)
-end)
 ```
 
 ### Query Cancellation
 
 ```elixir
-# Start a long-running query with custom ID
-query_id = "my-long-query-#{System.unique_integer()}"
+query_id = "my-long-query-#{System.unique_integer([:positive])}"
 
-task = Task.async(fn ->
-  Huginn.query("SELECT sleep(300)", query_id: query_id)
-end)
+task = Task.async(fn -> Huginn.query("SELECT sleep(3)", query_id: query_id) end)
 
-# Cancel after some time
-Process.sleep(5_000)
 :ok = Huginn.cancel(query_id)
 
-# Cancel queries by condition
+# Trusted input only: the condition is interpolated verbatim
 Huginn.cancel_where("elapsed > 60")
-Huginn.cancel_where("user = 'admin'")
 
 # List running queries
 {:ok, result} = Huginn.running_queries()
 Huginn.Clickhouse.Result.to_maps(result)
-|> Enum.each(fn q -> IO.puts("#{q["query_id"]}: #{q["query"]}") end)
 ```
 
 ### Health Check
@@ -289,20 +284,23 @@ Huginn.Clickhouse.Result.to_maps(result)
 ```elixir
 case Huginn.ping() do
   :ok -> IO.puts("Connected!")
-  {:error, reason} -> IO.puts("Failed: #{inspect(reason)}")
+  {:error, error} -> IO.puts("Failed: #{Exception.message(error)}")
 end
 ```
 
 ## Telemetry
 
-Each request issued through `query/2`, `insert/3`, and `insert_stream/3` is
-wrapped in a [`:telemetry`](https://hexdocs.pm/telemetry) span:
+Every request — `query/2`, `insert/3`, `insert_stream/3`, `stream_query/2`,
+`stream_io/3` — is wrapped in a [`:telemetry`](https://hexdocs.pm/telemetry)
+span. For lazy streams, `:start` fires when enumeration begins and `:stop`
+when it ends.
 
 | Event | Measurements | Metadata |
 | ----- | ------------ | -------- |
 | `[:huginn, :query, :start]` | `:system_time`, `:monotonic_time` | `:method`, `:sql`, `:query_id`, `:pool` |
-| `[:huginn, :query, :stop]` | `:duration`, `:monotonic_time` | above + `:rows`, `:stats` (or `:error`) |
+| `[:huginn, :query, :stop]` | `:duration`, `:monotonic_time` | above + `:stats` and `:rows`, or `:error` (a `Huginn.Error`), or `halted: true` |
 | `[:huginn, :query, :exception]` | `:duration`, `:monotonic_time` | above + `:kind`, `:reason`, `:stacktrace` |
+| `[:huginn, :query, :retry]` | `:attempt`, `:delay` | `:method`, `:sql`, `:query_id`, `:pool`, `:error` |
 
 Attach the built-in logger (off by default), or your own handler:
 
@@ -310,29 +308,27 @@ Attach the built-in logger (off by default), or your own handler:
 # Logs each completed query with its duration; failures log at :error.
 Huginn.attach_default_logger(:info)
 
-# ...or attach a custom handler
-:telemetry.attach(
-  "my-handler",
-  [:huginn, :query, :stop],
-  fn _event, %{duration: d}, meta, _ ->
-    ms = System.convert_time_unit(d, :native, :millisecond)
-    MyMetrics.histogram("clickhouse.query.duration", ms, tags: [meta.method])
-  end,
-  nil
-)
+# ...or attach a custom handler (a module function capture avoids
+# telemetry's local-function performance warning)
+:telemetry.attach("my-handler", [:huginn, :query, :stop], &MyApp.Metrics.handle_event/4, nil)
 ```
 
 See `Huginn.Clickhouse.Telemetry` for the full reference.
 
 ## Retries
 
-`query/2` and `insert/3` can retry transient transport failures (connection
-errors and gRPC `UNAVAILABLE`/`DEADLINE_EXCEEDED`) with exponential backoff.
-Retries are off by default, and ClickHouse query errors are never retried.
+Retries are off by default and only retry `%Huginn.Error{reason: :connection}`
+failures; ClickHouse errors and timeouts are never retried. The delay before
+attempt `n` is drawn uniformly from `1..min(retry_backoff * 2^(n-1), retry_max_backoff)`.
+
+- `query/2` repeats the whole request, so only enable retries for statements
+  that are safe to run twice.
+- `insert/3`, `insert_stream/3` and the streams retry only channel
+  acquisition — nothing that reached the server is sent twice. For retries of
+  your own, set ClickHouse's `insert_deduplication_token` setting.
 
 ```elixir
-# Up to 3 extra attempts, backing off 100ms, 200ms, 400ms.
-Huginn.query("SELECT 1", retries: 3, retry_backoff: 100)
+Huginn.query("SELECT 1", retries: 3, retry_backoff: 100, retry_max_backoff: 2_000)
 ```
 
 See `Huginn.Clickhouse.Retry` for details.
@@ -341,7 +337,7 @@ See `Huginn.Clickhouse.Retry` for details.
 
 ### Prerequisites
 
-- Elixir 1.14+
+- Elixir 1.18+
 - Docker and Docker Compose
 - `protoc` compiler (`brew install protobuf` on macOS)
 
@@ -378,7 +374,7 @@ To refresh it and regenerate the bindings:
 ```bash
 # Pin the plugin to the `:protobuf` version in mix.lock so the generated code
 # and the runtime library never disagree.
-mix escript.install hex protobuf 0.17.0
+mix escript.install hex protobuf 0.17.1
 
 curl -o priv/protos/clickhouse_grpc.proto \
   https://raw.githubusercontent.com/ClickHouse/ClickHouse/master/src/Server/grpc_protos/clickhouse_grpc.proto
